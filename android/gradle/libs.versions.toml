@@ -1,0 +1,32 @@
+[versions]
+agp = "9.3.1"
+androidx-activity-compose = "1.9.3"
+androidx-compose-bom = "2024.09.03"
+androidx-core = "1.16.0"
+androidx-lifecycle-viewmodel-compose = "2.8.7"
+adk = "0.8.0"
+compose-compiler = "2.2.10"
+junit = "4.13.2"
+kotlinx-coroutines = "1.11.0"
+ksp = "2.3.9"
+litertlm = "0.13.1"
+
+[libraries]
+adk-core-android = { module = "com.google.adk:google-adk-kotlin-core-android", version.ref = "adk" }
+adk-litertlm-android = { module = "com.google.adk:google-adk-kotlin-litertlm-android", version.ref = "adk" }
+adk-processor = { module = "com.google.adk:google-adk-kotlin-processor", version.ref = "adk" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity-compose" }
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "androidx-compose-bom" }
+androidx-compose-foundation = { module = "androidx.compose.foundation:foundation" }
+androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-core = { module = "androidx.core:core", version.ref = "androidx-core" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle-viewmodel-compose" }
+junit = { module = "junit:junit", version.ref = "junit" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+litertlm-android = { module = "com.google.ai.edge.litertlm:litertlm-android", version.ref = "litertlm" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "compose-compiler" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
