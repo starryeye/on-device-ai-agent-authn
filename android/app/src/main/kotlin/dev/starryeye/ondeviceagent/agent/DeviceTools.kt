@@ -42,6 +42,13 @@ class DeviceTools(private val batteryReader: BatteryReader) {
 /**
  * 잔량을 툴 응답으로 바꾼다. 잔량을 보고하지 못하는 기기는 `Integer.MIN_VALUE`를 주므로,
  * 그런 값을 모델에 넘기지 않는다.
+ *
+ * 실패 시 이 맵에 담기는 `FunctionTool.ERROR_KEY`("error")는 ADK가 특별히 처리해 주는
+ * 키가 아니라 단순한 관례다. 게다가 KSP가 생성한 툴 래퍼(`GetBatteryLevelTool`)가
+ * [DeviceTools.getBatteryLevel]의 반환값을 `BaseTool.RESULT_KEY`("result")로 한 번 더
+ * 감싸므로, 모델에 실제로 전달되는 JSON은 `{"error": "..."}`이 아니라
+ * `{"result": {"error": "..."}}` 형태이고, 성공 시에도 `{"result": {"battery_percent": N}}`
+ * 형태다.
  */
 internal fun batteryLevelResult(percent: Int): Map<String, Any> =
   if (percent in 0..100) {
