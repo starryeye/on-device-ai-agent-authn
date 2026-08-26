@@ -62,6 +62,24 @@ adb shell dumpsys battery set level 42
 adb shell dumpsys battery reset
 ```
 
+## 관찰된 결과
+
+이 확인은 `adk-arm64` 에뮬레이터(API 36, arm64)에서 `gemma-4-E2B-it.litertlm`으로 진행했다.
+
+한 대화에서 배터리 값 변화를 추적했다:
+
+1. "What is my battery percentage?"
+   → `툴 호출: get_battery_level`
+   → "Your battery is at 100%."
+
+2. 외부에서 배터리를 강제 변경: `adb shell dumpsys battery set level 42`
+
+3. "What is my battery percentage now?"
+   → `툴 호출: get_battery_level`
+   → "Your battery is currently at 42%."
+
+이 형태의 확인이 중요한 이유는 값이 정말 도구에서 읽혀 왔다는 것을 증명하기 때문이다. 모델이 추측하고 있었다면 또는 바로 이전의 "100"을 반복하고 있었다면, 다시 묻는 것에 다른 답을 줄 수 없다. 외부 변화 후 답이 42로 바뀐 것은 그 숫자가 도구 호출에서만 올 수 있다는 증거다.
+
 ## 오프라인 확인
 
 ```bash
