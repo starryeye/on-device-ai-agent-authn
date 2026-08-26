@@ -25,8 +25,10 @@ import java.io.File
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 /**
@@ -43,6 +45,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
   private val sessionService = InMemorySessionService()
   private var runner: InMemoryRunner? = null
   private var model: LiteRtLmModel? = null
+
+  /**
+   * 지금 돌고 있는(또는 마지막으로 돌았던) [viewModelScope] 코루틴. [onCleared]가 네이티브
+   * 엔진을 닫기 전에 이걸 join해서, 취소해도 멈추지 않는 블로킹 네이티브 작업이 끝날 때까지
+   * 기다린다.
+   */
+  private var activeJob: Job? = null
 
   private val _messages = mutableStateListOf<ChatMessage>()
   val messages: List<ChatMessage> = _messages
@@ -61,7 +70,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     get() = ModelStore.pushDirectory(getApplication<Application>())
 
   init {
-    viewModelScope.launch {
+    activeJob = viewModelScope.launch {
       val modelFile = withContext(Dispatchers.IO) { ModelStore.find(getApplication<Application>()) }
       if (modelFile == null) {
         addSystem(
@@ -78,7 +87,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
   /** 가중치를 받고 이어서 로드한다. 이 앱이 네트워크를 쓰는 유일한 경로다. */
   fun downloadModel() {
     if (uiState !is AgentUiState.NeedsModel) return
-    viewModelScope.launch {
+    activeJob = viewModelScope.launch {
       uiState = AgentUiState.Downloading(0f)
       try {
         ModelStore.download(getApplication<Application>()).collect { fraction ->
@@ -106,9 +115,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
           val created = OnDeviceAgent.createModel(modelFile, getApplication<Application>().cacheDir)
           // 첫 메시지가 아니라 지금 로드한다. 그래야 깨진 파일이 깨진 파일로 보고된다.
           created.engine.initialize()
+          // 이 블록 안에서 바로 필드에 반영한다. viewModelScope가 취소된 채로 이 블록이
+          // 끝나면 withContext는 결과 대신 CancellationException으로 재개하므로, 바깥에서
+          // "model = ..."를 했다가는 이미 만들어진 네이티브 엔진이 필드 어디에도 걸리지 않고
+          // 새어나간다.
+          model = created
           created
         }
-      model = loaded
       runner =
         InMemoryRunner(
           agent = OnDeviceAgent.create(loaded, AndroidBatteryReader(getApplication<Application>())),
@@ -117,6 +130,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         )
       addSystem("준비됐습니다. \"배터리 몇 퍼센트야?\" 라고 물어보세요 — 툴을 호출해 답합니다.")
       uiState = AgentUiState.Ready
+    } catch (e: CancellationException) {
+      // 취소는 정상적인 종료다. 여기서 화면에 실패를 보고하면 이미 사라지는 중인 화면의
+      // Compose 상태를 건드리게 되고, 사용자에게는 거짓 오류로 보인다.
+      throw e
     } catch (e: Throwable) {
       // Throwable: 네이티브 바이너리가 없는 기기는 UnsatisfiedLinkError로 실패한다.
       val reason = e.message ?: e::class.simpleName ?: "알 수 없는 오류"
@@ -132,7 +149,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     _messages.add(ChatMessage(ChatAuthor.USER, text))
     busy = true
 
-    viewModelScope.launch {
+    activeJob = viewModelScope.launch {
       val partial = StringBuilder()
       var bubbleIndex = -1
       try {
@@ -181,13 +198,28 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
   /**
    * 네이티브 엔진을 놓아준다. 별도 스레드인 것은 해제가 느리기 때문이고, 예외를 삼키는 것은
    * 여기서 터진 예외가 프로세스를 통째로 내리기 때문이다.
+   *
+   * lifecycle 2.8.7에서 `ViewModel.clear()`는 [onCleared]를 부르기 전에 [viewModelScope]의
+   * Job을 먼저 취소한다. 하지만 그 순간 `Dispatchers.IO`에서 돌고 있는 블로킹 네이티브 호출
+   * (모델 로드 중 `engine.initialize()`, 또는 turn 도중의 생성)은 협조적 취소를 관찰하지
+   * 못하고 그대로 계속 실행된다. 그 작업이 실제로 끝나기 전에 여기서 바로 엔진을 닫으면 그
+   * 네이티브 호출은 이미 해제된 핸들을 계속 쓰게 된다 — JNI 쪽 use-after-free라 Throwable로
+   * 잡히지도 않는다. 그래서 [activeJob]이 실제로 끝날 때까지 기다린 다음에야 엔진을 닫는다.
    */
   override fun onCleared() {
-    val closing = model
-    model = null
-    runner = null
-    if (closing != null) {
-      thread(name = "litertlm-close") {
+    val job = activeJob
+    thread(name = "litertlm-close") {
+      if (job != null) {
+        // join은 그 코루틴이 실제로 멈춘 뒤에야 돌아온다 — 협조적 취소가 아니라 블로킹
+        // 네이티브 호출이 자연히 리턴하는 시점까지 기다리는 것이다.
+        runBlocking { job.join() }
+      }
+      // model은 로드 중 취소되더라도 loadModel이 IO 블록 안에서 미리 필드에 반영해두므로,
+      // join이 끝난 지금 시점에는 "만들어졌다면 반드시 여기 담겨 있다"가 보장된다.
+      val closing = model
+      model = null
+      runner = null
+      if (closing != null) {
         try {
           closing.close()
         } catch (_: Throwable) {
