@@ -17,6 +17,9 @@ android {
     targetSdk = 36
     versionCode = 1
     versionName = "0.1.0"
+
+    // 기기에서 실제 모델로 에이전트를 구동하는 계측 테스트용.
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   buildFeatures { compose = true }
@@ -53,4 +56,8 @@ dependencies {
   ksp(libs.adk.processor)
 
   testImplementation(libs.junit)
+
+  androidTestImplementation(libs.junit)
+  androidTestImplementation(libs.androidx.test.ext.junit)
+  androidTestImplementation(libs.androidx.test.runner)
 }
