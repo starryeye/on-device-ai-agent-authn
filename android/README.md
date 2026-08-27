@@ -124,6 +124,48 @@ adb shell dumpsys battery reset
 
 한 번 실행에 다섯 조건 × 3회 = 15 turn이라 에뮬레이터에서는 몇 분이 걸린다.
 
+## 실기기에서 확인한 것
+
+갤럭시 A36 5G(SM-A366N, Snapdragon 6 Gen 3, RAM 5.4GB, Android 16)에서 확인했다.
+
+- 모델이 로드된다. 공식 예제가 권하는 RAM 8GB에 못 미치는 기기인데도 올라갔다.
+- 실제 배터리 잔량 77%를 물었을 때 `툴 호출: get_battery_level` 이 뜨고 "Your battery is
+  at 77%." 라고 답했다. 에뮬레이터와 달리 `dumpsys battery set level` 로 값을 조작할 필요가
+  없다 — 폰의 진짜 잔량을 상태바에서 눈으로 확인하면 되므로, 오히려 더 깔끔한 검증이다.
+- `ToolCallLanguageTest`의 다섯 조건이 모두 통과한다(15 turn, 3분 54초). 같은 조건이
+  에뮬레이터에서는 turn당 약 31초, 실기기에서는 약 16초로 대략 두 배 빠르다.
+
+## 백엔드 — CPU 말고는 선택지가 없다
+
+`OnDeviceAgent.createModel`은 `Backend.CPU()`로 고정돼 있다. 에뮬레이터에서는 그것 말고
+되는 게 없어서 그렇게 시작했지만, 실기기에서 셋을 다 재 본 결과 여기서도 CPU가 유일했다
+(`BackendBenchmarkTest`).
+
+| 백엔드 | 결과 |
+|---|---|
+| CPU | turn 평균 13.1초 |
+| GPU | 사용 불가 |
+| NPU | 사용 불가 |
+
+**GPU**는 LiteRT-LM이 OpenGL 백엔드로 내려간 뒤 델리게이트 생성에서 멈춘다 —
+`UNIMPLEMENTED: CreateSharedMemoryManager is not implemented`
+(`delegate_opengl.cc:218`). 라이브러리(0.13.1) 쪽 미구현이라 앱에서 손쓸 여지가 없다.
+
+**NPU**는 설정 문제가 아니었다. 디스패치 라이브러리 경로는 정상적으로 잡히는데
+(`litert_dispatch_lib_dir: .../lib/arm64`), 모델 파일에 NPU용 섹션이 없어서 실패한다 —
+`TF_LITE_AUX not found in the model`. 즉 **NPU로 돌리려면 NPU용으로 컴파일된 별도의
+`.litertlm` 파일**이 필요하다. 지금 모델은 내부 섹션이 `section_backend_constraint: cpu`로
+표시돼 있다.
+
+측정은 이렇게 돌린다.
+
+```bash
+adb shell am instrument -w -e class dev.starryeye.ondeviceagent.agent.BackendBenchmarkTest dev.starryeye.ondeviceagent.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+turn 시간만 본다. 툴을 호출하는 turn은 LLM 호출이 두 번 일어나는데 최종 답변은 20여 자뿐이라,
+초당 문자수 같은 지표는 실제 생성 속도를 반영하지 못한다.
+
 ## 오프라인 확인
 
 ```bash
