@@ -464,8 +464,8 @@ DPoP: <RFC 9449 proof JWS>
 Spring Boot 4.1.1 / **Java 21**. 저장소 루트의 `server/`에 독립 Gradle 빌드로 둔다.
 
 Java 17이 아니라 21인 이유는 공식 검증 라이브러리가 Java 21 툴체인을 요구하기 때문이다.
-언어는 Java로 쓴다(사용자 결정). 라이브러리가 Kotlin이지만 JVM 라이브러리이므로 Java에서
-그대로 쓴다.
+**언어는 Kotlin으로 쓴다**(사용자 결정, 2026-08-28). 안드로이드가 이미 Kotlin이라 저장소가 한
+언어로 통일되고, 검증 라이브러리도 Kotlin이라 nullable·sealed·`fun interface` 를 그대로 받는다.
 
 | 패키지 | 책임 | 무엇을 모르는가 |
 |---|---|---|

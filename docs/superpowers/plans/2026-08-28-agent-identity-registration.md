@@ -12,8 +12,16 @@
 
 ## Global Constraints
 
-- 서버는 **Java**로 쓴다. Kotlin 아님. (검증 라이브러리는 Kotlin이지만 JVM 라이브러리이므로 Java에서 그대로 쓴다)
-- 서버 **Java 21**. 공식 검증 라이브러리가 Java 21 툴체인을 요구한다
+- 서버는 **Kotlin**으로 쓴다 (사용자 결정, 2026-08-28. Task 1·2는 Java로 구현됐고 Task 2.5에서 포팅한다)
+- 서버 **JVM 타깃 21**. 공식 검증 라이브러리가 Java 21 툴체인을 요구한다
+- **Task 3~7의 브리프에 실린 코드는 Java로 적혀 있다.** 이는 동작 명세이며, 구현자는 아래 규칙에 따라 관용적 Kotlin으로 옮겨 쓴다. 동작·이름·시그니처의 의미는 그대로 유지한다:
+  - `record` → `data class`, `enum` → `enum class`, `sealed interface` 그대로
+  - `Optional<T>` → **nullable `T?`**. `Optional` 을 Kotlin 코드에 남기지 않는다
+  - `@FunctionalInterface` → `fun interface`
+  - 게터/세터 보일러플레이트 → 프로퍼티
+  - `instanceof` 분기 → `when` + 스마트 캐스트
+  - 상수 → `const val` (companion object 또는 최상위)
+  - 테스트 이름은 브리프의 한국어 이름을 백틱으로 감싸 그대로 쓴다
 - 서버는 `server/`에 **독립 Gradle 빌드**. `android/`와 섞지 않는다
 - 식별자: `urn:samsung:agent:<product>:<uuid>`. **조립은 한 클래스에만** 둔다
 - 인가 판단은 **전체 문자열 비교**. 접두어 비교 금지
@@ -735,6 +743,106 @@ public class AttestationConfiguration {
 
 ```bash
 git add -A && git commit -m "feat(server): attestation 체인 검증 (공식 검증기 래핑, 시각 주입)" && git push
+```
+
+---
+
+## Task 2.5: 서버를 Kotlin으로 포팅
+
+사용자가 서버 언어를 Kotlin으로 바꾸기로 했다(2026-08-28). Task 1·2가 Java로 구현·리뷰까지
+끝난 상태이므로, **동작을 바꾸지 않고 언어만 옮긴다.** 지금이 가장 싼 시점이다 — Task 3부터는
+포팅 대상이 세 배가 된다.
+
+**Files:**
+- Modify: `server/build.gradle.kts` (Kotlin JVM 플러그인 추가)
+- Delete: `server/src/main/java/**`, `server/src/test/java/**` (아래 대응 파일로 대체)
+- Create: `server/src/main/kotlin/dev/starryeye/agentidentity/ServerApplication.kt`
+- Create: `.../attestation/AttestationResult.kt`, `AttestationVerifier.kt`, `TrustAnchorSource.kt`, `RevocationSource.kt`, `AttestationConfiguration.kt`
+- Create: `server/src/test/kotlin/.../VerifierLinkageTest.kt`, `.../attestation/AttestationVerifierTest.kt`, `.../attestation/AttestationConfigurationTest.kt`
+
+**Interfaces:**
+- Consumes: Task 1·2의 결과물 전부
+- Produces: 같은 공개 API를 Kotlin으로. 이후 태스크는 Kotlin만 본다
+  - `fun interface TrustAnchorSource { fun anchors(): Set<TrustAnchor> }`
+  - `fun interface RevocationSource { fun revokedSerials(): Set<String> }`
+  - `sealed interface AttestationResult` — `data class Verified(...)` / `data class Rejected(val detail: String)`
+  - `class AttestationVerifier(anchors, revocation, clock) { fun verify(chain: List<X509Certificate>, expectedChallenge: ByteArray): AttestationResult }`
+
+- [ ] **Step 1: 현재 동작을 기준선으로 고정**
+
+포팅의 성공 기준은 **테스트가 그대로 통과하는 것**이다. 먼저 지금 상태를 기록한다.
+
+```bash
+cd server && ./gradlew clean test
+```
+Expected: 8개 통과. 이 숫자가 포팅 후에도 같아야 한다.
+
+- [ ] **Step 2: Kotlin 플러그인 추가**
+
+`server/build.gradle.kts` 의 `plugins` 블록에 더한다. 버전은 서브모듈이 쓰는 것과 맞춘다.
+
+```kotlin
+  kotlin("jvm") version "2.2.0"
+  kotlin("plugin.spring") version "2.2.0"
+```
+
+`kotlin.plugin.spring` 은 Spring이 요구하는 `open` 을 자동으로 붙여 준다. 없으면 `@Configuration`
+클래스가 final이라 프록시가 실패한다.
+
+`java { toolchain { ... } }` 은 그대로 두고, Kotlin에도 같은 타깃을 준다.
+
+```kotlin
+kotlin { jvmToolchain(21) }
+```
+
+- [ ] **Step 3: 한 파일씩 옮긴다**
+
+Java 파일을 읽고 대응하는 Kotlin 파일을 `src/main/kotlin` / `src/test/kotlin` 아래 같은 패키지에
+만든 뒤, Java 원본을 지운다. **동작을 바꾸지 않는다** — 로깅 분류, 예외 처리 범위, 지연 생성,
+타임아웃 값, Gson 파싱, 모호한 패키지 거절이 전부 그대로여야 한다.
+
+옮길 때 지킬 것:
+
+| Java | Kotlin |
+|---|---|
+| `record Verified(...)` | `data class Verified(...)` |
+| `Optional<T>` | `T?` |
+| `@FunctionalInterface` | `fun interface` |
+| 이중 검사 잠금 + `volatile` | `by lazy` (스레드 안전이 기본값) |
+| `instanceof` 분기 | `when` + 스마트 캐스트 |
+| `static final` 상수 | `private const val` (최상위 또는 companion) |
+
+`by lazy` 로 바꾸면 Task 2의 지연 생성 의도가 그대로 유지되고 이중 검사 잠금 코드가 사라진다.
+다만 **`by lazy` 는 예외를 캐시하지 않으므로** 첫 생성이 실패하면 다음 호출이 다시 시도한다 —
+Java 구현과 같은 성질이다.
+
+- [ ] **Step 4: 테스트가 그대로 통과하는지 확인 — 이 태스크의 검증점**
+
+```bash
+cd server && ./gradlew clean test
+```
+Expected: **8개 통과.** Step 1과 같은 숫자여야 한다. 줄어들면 테스트를 빠뜨린 것이고,
+늘어나면 이 태스크의 범위를 넘은 것이다.
+
+- [ ] **Step 5: Java 소스가 남아 있지 않은지 확인**
+
+```bash
+find server/src -name '*.java' | head
+```
+Expected: 아무것도 나오지 않는다.
+
+- [ ] **Step 6: 앱이 여전히 뜨는지 확인**
+
+```bash
+cd server && (./gradlew bootRun &) && sleep 45 && curl -s -o /dev/null -w "%{http_code}
+" localhost:8080/ ; pkill -f bootRun
+```
+Expected: HTTP 코드가 돌아온다(404 정상).
+
+- [ ] **Step 7: 커밋 & 푸시**
+
+```bash
+git add -A && git commit -m "refactor(server): Java에서 Kotlin으로 포팅 (동작 불변)" && git push
 ```
 
 ---
