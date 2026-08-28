@@ -28,6 +28,11 @@ dependencies {
   // 전이되지 않는다. Verifier 생성자가 실제 코틀린 함수 타입(Function0)을 받으므로
   // Java 에서 람다로 넘기려면 이 타입이 컴파일 시점에 보여야 한다. 서브모듈 버전(2.2.0)에 맞춘다.
   implementation("org.jetbrains.kotlin:kotlin-stdlib:2.2.0")
+  // 같은 이유로: keyattestation 의 공개 API(VerificationResult.Success, ChallengeChecker)가
+  // guava 의 ListenableFuture 와 protobuf 의 ByteString 을 직접 노출하는데, 서브모듈이 이
+  // 둘도 implementation 으로만 선언해 전이되지 않는다. 서브모듈 버전에 맞춘다.
+  implementation("com.google.guava:guava:33.5.0-jre")
+  implementation("com.google.protobuf:protobuf-javalite:4.28.3")
   runtimeOnly("com.h2database:h2")
 
   testImplementation("org.springframework.boot:spring-boot-starter-test")
