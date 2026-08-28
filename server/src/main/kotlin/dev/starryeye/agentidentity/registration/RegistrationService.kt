@@ -14,6 +14,7 @@ import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 import java.time.Clock
 import java.util.UUID
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 
 /** 등록을 조립한다. 검증도 정책 판단도 직접 하지 않고 각각에 맡긴다. */
@@ -92,7 +93,22 @@ class RegistrationService(
             verified.deviceLocked,
             clock.instant())
     identity.deviceBinding = deviceBinding
-    return Outcome.accepted(repository.save(identity))
+
+    return try {
+      Outcome.accepted(repository.save(identity))
+    } catch (e: DataIntegrityViolationException) {
+      // 같은 키로 동시에 들어온 첫 등록끼리의 경쟁. `findByJwkThumbprint` 로 아직 아무도
+      // 없다고 읽은 두 요청이 동시에 새 신원을 만들어 저장을 시도하면, 유니크 제약이 뒤늦게
+      // 도착한 쪽의 삽입을 막는다 — 그 제약은 최후 방어선이지 조율 수단이 아니다. 진 쪽은
+      // 예외로 실패하는 대신 이미 이긴 쪽이 만든 신원을 다시 찾아 그것을 결과로 돌려준다.
+      // 그래야 멱등성이 "같은 키는 같은 신원" 이 아니라 "먼저 요청한 쪽만" 으로 깨지지 않는다.
+      val winner =
+          repository.findByJwkThumbprint(thumbprint)
+              ?: throw IllegalStateException(
+                  "유니크 제약 위반 후에도 신원을 찾지 못했다: thumbprint=$thumbprint", e)
+      winner.markAttested(clock.instant())
+      Outcome.accepted(repository.save(winner))
+    }
   }
 
   companion object {
