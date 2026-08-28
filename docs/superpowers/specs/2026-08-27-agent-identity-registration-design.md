@@ -199,11 +199,39 @@ POST /agent/registration
 JWT의 `sub`는 agentId, `cnf.jkt`는 에이전트 공개키 지문(RFC 7638)이다. 즉 이 토큰은 그 키를
 가진 자만 쓸 수 있다.
 
-수명은 짧게 둔다. **별도의 갱신 엔드포인트는 이번 범위 밖이다** — 만료되면 클라이언트가
-①부터 다시 밟는다. 키는 이미 있으므로 새로 만들지 않고 재사용하며, attestation만 새 challenge로
-다시 제출한다. 갱신 프로토콜은 폐기·순환 정책과 함께 다뤄야 의미가 있어 뒤 사이클로 미룬다.
+**신원과 자격증명의 수명은 다르다.**
 
-### 4.3 자격증명 사용
+| | 수명 | 무엇에 묶이는가 |
+|---|---|---|
+| agentId (신원) | 키가 사는 동안 | 하드웨어 키 |
+| credential (자격증명) | 15분 | 그 신원 + 그 키 |
+
+**등록은 키 지문에 대해 멱등이다.** 서버는 `jwk_thumbprint`로 기존 신원을 먼저 찾는다.
+있으면 **같은 agentId를 그대로 돌려주고** 자격증명만 새로 발급한다. 없을 때만 새 agentId를
+만든다. 그래서 재등록해도 신원은 바뀌지 않는다.
+
+새 agentId가 생기는 경우는 하나뿐이다 — **키가 바뀔 때**(앱 재설치 등). 새 설치본은 새 에이전트
+인스턴스이므로 의도된 동작이다.
+
+### 4.3 자격증명 갱신
+
+만료마다 attestation을 다시 하는 것은 낭비이고, 신원을 흔들 위험도 있다. 갱신은 **하드웨어 키
+자체를 자격증명으로 쓴다.**
+
+```
+POST /agent/credential
+DPoP: <RFC 9449 proof, 에이전트 키로 서명>
+→ 200 { "agentId": "...", "credential": "...", "expiresIn": 900 }
+```
+
+서버는 proof를 검증하고 그 키 지문으로 신원을 찾는다. `ACTIVE`면 자격증명을 새로 발급한다.
+**체인 검증도 challenge도 필요 없다** — 등록 시점에 이미 검증했고, 그 키를 지금 쥐고 있다는
+사실이 proof로 증명되기 때문이다.
+
+이 구조에서 **오래가는 자격증명은 하드웨어 키이고, JWT는 그것에 묶인 단명 토큰**이다. DPoP
+검증은 `whoami`에도 어차피 필요하므로 추가 비용이 거의 없다.
+
+### 4.4 자격증명 사용
 
 ```
 GET /agent/whoami
@@ -238,7 +266,7 @@ H2 파일 기반. 연구용 저장소에서 외부 DB를 세우게 하면 재현
 ```
 agent_identity
   id                 spiffe URI (PK)
-  jwk_thumbprint     unique
+  jwk_thumbprint     unique  ← 신원의 실질적 키. 등록은 이 값에 대해 멱등
   public_key
   package_name
   signing_digest
@@ -374,7 +402,7 @@ agent-registration:
 | 부팅 검증 실패 | 403 `POLICY_VERIFIED_BOOT` | 재시도 무의미 |
 | 패키지/서명키 불일치 | 403 `POLICY_APPLICATION` | 재시도 무의미 |
 | 기기 증명 없음 (정책이 요구할 때) | 403 `POLICY_DEVICE_BINDING` | 재시도 무의미 |
-| 자격증명 만료 | 401 `CREDENTIAL_EXPIRED` | 기존 키로 재등록 (①부터) |
+| 자격증명 만료 | 401 `CREDENTIAL_EXPIRED` | `POST /agent/credential` 로 갱신 (4.3) |
 | DPoP proof 불량 | 401 `DPOP_INVALID` | proof 재생성 |
 | 키 소실 (재설치) | — | 새로 등록 |
 
@@ -395,6 +423,8 @@ agent-registration:
 4. **정책 판단** — 각 설정 조합에서 기대한 사유 코드가 나오는가
 5. **DPoP proof 검증** — 재생 공격(`jti` 중복), `htm`/`htu` 불일치, 시계 오차 경계,
    `cnf.jkt` 불일치
+6. **등록 멱등성** — 같은 키로 두 번 등록하면 같은 agentId가 나오는가. 다른 키면 다른 agentId가
+   나오는가. 이게 깨지면 신원이 자격증명 수명에 끌려다닌다
 
 ### 9.2 기기가 필요한 것
 
@@ -414,7 +444,6 @@ agent-registration:
 - 사용자 위임 (`act` 클레임, OBO) — ②번
 - 행동별 인가, step-up 인증 — ③번
 - 신원 폐기·순환 정책 — 저장 모델에 `status`만 두고 운영은 다루지 않는다
-- 자격증명 갱신 엔드포인트 — 만료 시 재등록으로 대체한다 (4.2 ⑤ 참조)
 - Device ID / Knox attestation **구현** — 7장의 이음매까지만
 - AppFunctions 노출 — 2.1절의 이유로 제외
 - 실제 삼성 계정 연동 — `server/`가 그 역할을 흉내 낼 뿐이다
@@ -425,11 +454,13 @@ agent-registration:
 1. `server/`가 빌드되고 단위 테스트가 통과한다
 2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `spiffe://...` 신원이 보인다
 3. 그 자격증명으로 `GET /agent/whoami`가 DPoP 검증을 통과하고 같은 agentId를 돌려준다
-4. 정책을 `require-security-level: STRONGBOX`로 올리면 A36의 등록이
+4. 앱을 재시작해도 **같은 agentId**가 유지된다. 재등록해도 신원은 바뀌지 않는다
+5. `POST /agent/credential`이 attestation 없이 새 자격증명을 발급한다
+6. 정책을 `require-security-level: STRONGBOX`로 올리면 A36의 등록이
    `POLICY_SECURITY_LEVEL`로 거절된다
-5. 정책을 `require-device-binding: true`로 올리면 `POLICY_DEVICE_BINDING`으로 거절된다
-6. 변조 픽스처(패키지명·challenge·보안수준)가 모두 거절된다
-7. DPoP proof 재생 공격이 거절된다
+7. 정책을 `require-device-binding: true`로 올리면 `POLICY_DEVICE_BINDING`으로 거절된다
+8. 변조 픽스처(패키지명·challenge·보안수준)가 모두 거절된다
+9. DPoP proof 재생 공격이 거절된다
 
 ## 12. 리스크
 
