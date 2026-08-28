@@ -109,6 +109,49 @@ com.samsung.android.knox.attestation
 verifiers"*. 다만 **Maven Central에서 찾지 못했다.** 소스에서 빌드하거나 벤더링해야 한다.
 그 비용과 자체 파서의 위험을 구현 첫 단계에서 비교해 정한다(§5).
 
+### 2.4.1 실측한 체인 하나 (표본이지 규격이 아니다)
+
+`AttestationProbeTest`로 A36에서 체인을 뽑아 호스트에서 검증했다. **이 값들은 설계가 성립하는지
+확인하는 표본이며, 이 기기에 맞추라는 뜻이 아니다.**
+
+검증 결과: `openssl verify -CAfile <구글 공개 루트> -untrusted <중간> leaf` → **OK**.
+체인 5장의 시리얼 모두 CRL에 없음.
+
+```
+[0] CN=Android Keystore Key          issuer: CN=<hex>, O=TEE     확장 …2.1.17
+[1] CN=<hex>, O=TEE                  issuer: CN=Droid CA3        2026-08-21 ~ 09-03  ← 13일
+[2] CN=Droid CA3, O=Google LLC       issuer: CN=Droid CA2        2026-07-30 ~ 10-08
+[3] CN=Droid CA2, O=Google LLC       issuer: Key Attestation CA1 2026-02-10 ~ 2029-02-09
+[4] CN=Key Attestation CA1 (자기서명, 공개 루트 목록과 바이트 일치)  2025-07 ~ 2035-07
+```
+
+확장(`1.3.6.1.4.1.11129.2.1.17`) 내부에서 **리스트가 둘로 갈리는 것을 실물로 확인했다.**
+
+```
+attestationVersion=300, securityLevel=1(TrustedEnvironment)
+attestationChallenge = 우리가 넣은 32바이트 그대로  ← 하드웨어 서명 안에 박힌다
+
+softwareEnforced : [701] 생성시각, [709] attestationApplicationId
+                             └ "dev.starryeye.ondeviceagent" + 서명 다이제스트
+teeEnforced      : [1] purpose, [2] algorithm, [3] keySize, [5] digest,
+                   [10] ecCurve, [702] origin=0(GENERATED), [704] rootOfTrust
+```
+
+**§4.2④의 하드웨어/소프트웨어 구분이 실물로 확인됐다.** 앱 신원은 소프트웨어 목록에 있고,
+`origin`과 `rootOfTrust`는 하드웨어 목록에 있다.
+
+**절대 하드코딩하지 말 것.** 아래는 이 기기의 값이지 규격이 아니다.
+
+| 값 | 이 표본 | 다른 기기에서 |
+|---|---|---|
+| 체인 길이 | 5 | 다르다. 레거시 공장 키 기기는 보통 더 짧다 |
+| `attestationVersion` | 300 | 1·2·3·4·100·200·300… 파서가 버전을 분기해야 한다 |
+| `securityLevel` | 1 (TEE) | StrongBox(2)도, Software(0)도 온다 |
+| 중간 CN | `Droid CA2`/`CA3`, `O=TEE` | 구글·OEM 구현 세부이며 바뀔 수 있다 |
+| 루트 | `Key Attestation CA1` | 레거시 루트로 오는 기기가 여전히 있다 |
+
+검증은 **구조와 공개 목록**에 기대야 하고, 관찰된 문자열에 기대면 안 된다.
+
 ### 2.5 표준 지형
 
 확정 RFC와 진행 중 draft가 섞여 있다. 이번 사이클은 **확정 RFC만으로 구성**하고, draft는
@@ -681,8 +724,13 @@ agent-registration:
 
 여기가 대부분이고, 이 사이클에서 자동 테스트가 실제로 의미를 갖는 영역이다.
 
-1. **attestation 확장 파싱** — A36에서 실제 체인을 한 번 뽑아 픽스처로 고정한다. 기기 없이도
-   진짜 데이터로 테스트된다.
+1. **attestation 확장 파싱** — 실기기에서 뽑은 체인을 픽스처로 고정한다. 기기 없이도 진짜
+   데이터로 테스트된다.
+
+   **다만 픽스처는 만료된다.** 실측한 RKP 중간 인증서의 유효기간이 13일이었다(§2.4.1). 시스템
+   시각으로 검증하면 픽스처가 2주도 못 가 저절로 실패하고, 어느 날 갑자기 깨진 빌드의 원인을
+   찾느라 시간을 쓰게 된다. **검증기는 "현재 시각"을 주입받아야 하고**, 픽스처 테스트는 체인이
+   유효했던 시점을 고정해 넣는다. 만료 거절 테스트는 그 시각을 뒤로 밀어 만든다.
 2. **변조 픽스처가 거절되는가** — 다른 패키지명, 틀린 challenge, 낮춘 보안 수준, 깨진 서명,
    만료된 인증서. **음성 테스트가 양성 테스트보다 중요하다.**
 3. **challenge 1회용·만료**
