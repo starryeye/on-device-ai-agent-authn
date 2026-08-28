@@ -33,9 +33,17 @@ dependencies {
   // 둘도 implementation 으로만 선언해 전이되지 않는다. 서브모듈 버전에 맞춘다.
   implementation("com.google.guava:guava:33.5.0-jre")
   implementation("com.google.protobuf:protobuf-javalite:4.28.3")
+  // AttestationConfiguration 이 구글 루트 목록 응답(JSON)을 파싱하는 데 쓴다. 손으로 짠
+  // 문자열 스캔 대신 정식 JSON 파서를 쓰기 위함이다. 서브모듈도 이미 같은 버전을 쓰지만
+  // implementation 으로만 선언해 전이되지 않으므로 직접 추가한다.
+  implementation("com.google.code.gson:gson:2.11.0")
   runtimeOnly("com.h2database:h2")
 
   testImplementation("org.springframework.boot:spring-boot-starter-test")
+  // AttestationVerifierTest 가 "신뢰 앵커와 무관한 자기서명 인증서"를 직접 만들어 실제
+  // 경로 검증 실패(PathValidationFailure)를 재현하는 데 쓴다. JDK 는 인증서 생성 공개
+  // API 가 없어서 필요하다. 서브모듈이 이미 쓰는 버전(1.78.1)에 맞춘다.
+  testImplementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }
 
 tasks.withType<Test> { useJUnitPlatform() }
