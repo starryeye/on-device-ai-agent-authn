@@ -1,8 +1,29 @@
-# 인증 서버 (예정)
+# 에이전트 신원 발급 서버
 
-아직 구현하지 않았다. 이 디렉터리는 자리표시다.
+온디바이스 에이전트에게 하드웨어에 묶인 신원을 발급한다.
+설계: [../docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md](../docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md)
 
-에이전트가 인증이 필요한 행동을 툴로 호출하는 시나리오를 다루게 된다. `android/`와는
-별도의 Gradle 루트로 두어, 안드로이드 빌드와 서로 간섭하지 않게 한다.
+## 사전 준비
 
-전제 조건인 "온디바이스 에이전트의 툴 호출"은 `android/`에서 먼저 검증했다.
+Key Attestation 검증에 구글 공식 라이브러리를 쓴다. Maven Central 에 없어 서브모듈로 받는다.
+
+```bash
+git submodule update --init --recursive
+```
+
+Java 21 이 필요하다(라이브러리 요구사항). Gradle 툴체인이 자동으로 받아온다.
+
+## 빌드와 실행
+
+```bash
+./gradlew build
+./gradlew bootRun
+```
+
+## 안드로이드에서 접속
+
+기기에서 맥의 서버로 닿게 한다.
+
+```bash
+adb reverse tcp:8080 tcp:8080
+```
