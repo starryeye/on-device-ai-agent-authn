@@ -88,27 +88,47 @@ com.samsung.android.knox.attestation
 | RFC 7591 동적 클라이언트 등록 | 확정 | 형태만 참고 |
 | RFC 8693 토큰 교환 / OBO | 확정 | ②번 |
 | draft-oauth-ai-agents-on-behalf-of-user | draft | ②번 |
-| WIMSE Workload Identifier (`wimse://`) | draft (WG) | **식별자 형식 채택** |
-| SPIFFE | CNCF | **쓰지 않음** (사유는 아래) |
+| SPIFFE / WIMSE 식별자 | CNCF / draft | **쓰지 않음** (사유는 아래) |
 
-**프레임워크로서의 SPIFFE/SPIRE는 채택하지 않는다.** SPIFFE는 운영자가 노드를 통제하는
-환경을 전제하고 격리 보장을 범위 밖으로 둔다. 우리 노드는 사용자의 폰이고 사용자가 공격자일
-수 있어 전제가 맞지 않는다.
+**SPIFFE도 WIMSE도 식별자로 쓰지 않는다.** 둘 다 검토했고, 각각 다른 이유로 물렸다.
 
-**식별자는 `wimse://` 를 쓴다.** `spiffe://` 스킴을 쓰면서 SPIFFE의 신뢰 모델(trust bundle,
-SVID, Workload API)을 구현하지 않는 것은 오해를 부르는 오용이다. 반면
-[WIMSE Workload Identifier draft](https://datatracker.ietf.org/doc/draft-ietf-wimse-identifier/)는
-`wimse://` 스킴을 따로 정의하고 **독립 사용을 명시적으로 전제**한다 — *"This document does not
-prescribe how identifiers are issued or verified"*. 신뢰 도메인은 불투명 문자열이며 번들이나
-디스커버리를 요구하지 않는다. 우리가 하려는 일과 정확히 맞는다.
+`spiffe://`는 쓰면 안 된다. 그 스킴은 SPIFFE의 신뢰 모델(trust bundle, SVID, Workload API)을
+함의하는데 우리는 그중 아무것도 구현하지 않는다. 식별자만 빌리고 "SPIFFE를 쓴다"고 말하는 것은
+오용이다.
 
-채택에 따라 지는 의무는 셋이다.
+`wimse://`는 오용은 아니다 — [식별자 draft](https://datatracker.ietf.org/doc/draft-ietf-wimse-identifier/)가
+`wimse://` 스킴을 따로 정의하고 독립 사용을 명시적으로 전제한다(*"does not prescribe how
+identifiers are issued or verified"*). 그러나 **WIMSE가 상정하는 대상이 우리가 아니다.** WIMSE는
+워크로드를 "마이크로서비스, 컨테이너, VM, 서버리스 함수"로 정의하고 운영자가 노드를 통제하는
+환경을 전제한다. 우리 에이전트는 사용자 소유 폰의 앱 인스턴스이고 사용자가 공격자일 수 있다.
+성격상 워크로드보다 **클라이언트 측 주체**에 가깝다.
 
-1. 신뢰 도메인 안에서 식별자가 **유일**해야 한다
-2. 최대 **2048바이트**까지 파싱해야 한다
-3. 인가 판단에서 **전체 URI를 비교**한다. 경로 접두어 비교는 우회 취약점이 되므로 금지한다
+그리고 `wimse://`를 택할 유일한 실질적 우위는 "표준이 그쪽으로 갈 테니 미리 맞춰두면 이득"
+이었는데, 이는 검증할 수 없는 베팅이다. draft 의존까지 지면서 살 만한 값이 아니다.
 
-draft(-03)이므로 스킴이 바뀔 수 있다. 식별자 조립을 한 곳에 가두어 교체 비용을 한 줄로 만든다.
+**대신 자체 식별자를 쓴다.**
+
+```
+urn:samsung:agent:<product>:<instance-uuid>
+예) urn:samsung:agent:galaxy-personal-agent:3f2a8b11-4c7d-...
+```
+
+`RFC 8141` URN **문법**을 따른다. 다만 **NID `samsung`은 IANA에 등록되지 않은 사설
+네임스페이스**다. 등록된 URN을 쓰는 것이 아니라 URN 문법으로 우리 이름을 짓는 것이며, 이
+문서는 그 이상을 주장하지 않는다.
+
+구조화된 식별자를 쓰는 이유는 하나로 좁혀진다 — **②번의 `act.sub`**. 위임 토큰에서 행위자를
+가리키는 그 자리에 불투명 UUID가 놓이면 리소스 서버가 그것이 무엇인지, 어느 발급자의 것인지
+알 수 없다. 네임스페이스와 종류가 문자열에 들어 있으면 그 자리에서 실제로 일을 한다.
+
+형식과 무관하게 지킬 규칙 둘은 남긴다.
+
+1. 네임스페이스 안에서 **유일**해야 한다
+2. 인가 판단에서 **전체 문자열을 비교**한다. 접두어 비교는 `...:agent:x`가 `...:agent:xyz`를
+   통과시키는 우회가 되므로 금지한다
+
+식별자 조립은 **한 클래스에 가둔다.** 나중에 표준 형식으로 옮길 이유가 생기면 교체가 한 줄이
+되게 한다.
 
 SPIFFE에서는 **단명 자격증명 자동 갱신** 원칙만 개념으로 가져온다.
 
@@ -243,7 +263,7 @@ DPoP 검증기를 그대로 재사용할 수 있고, 검증 로직이 두 벌이
 
 ```
 → 200 {
-  "agentId": "wimse://agent.samsung.example/agent/<product>/<uuid>",
+  "agentId": "urn:samsung:agent:<product>:<uuid>",
   "credential": "<서버 서명 JWT>",
   "expiresIn": 900
 }
@@ -304,7 +324,7 @@ Spring Boot 3.x / Java 17. 저장소 루트의 `server/`에 독립 Gradle 빌드
 | `attestation` | 체인 검증, 확장 파싱 | HTTP도 JWT도 모름 |
 | `policy` | 수용/거절 판단 + 사유 | 어디서 불리는지 모름 |
 | `registration` | challenge 발급, 등록 오케스트레이션 | 검증 방법을 모름 |
-| `identity` | 신원 저장, 자격증명 발급 | attestation을 모름 |
+| `identity` | 신원 저장, 자격증명 발급, **식별자 조립(한 클래스)** | attestation을 모름 |
 | `dpop` | RFC 9449 proof 검증 | 도메인을 모름 |
 | `api` | 엔드포인트 | 위를 조립만 |
 
@@ -318,7 +338,7 @@ H2 파일 기반. 연구용 저장소에서 외부 DB를 세우게 하면 재현
 
 ```
 agent_identity
-  id                    wimse:// URI (PK)
+  id                    URN 문자열 (PK)
   agent_product_id      어떤 종류의 에이전트인가 (예: galaxy-personal-agent)
   jwk_thumbprint        unique  ← 신원의 실질적 키. 등록은 이 값에 대해 멱등
   public_key
@@ -404,7 +424,7 @@ agent-registration:
   require-device-binding: false                 # 7장. 1st-party 배포에서 true 로 올린다
   require-play-integrity: false                 # 5.3. 이번 사이클 기본 off
   agent-product-id: galaxy-personal-agent
-  trust-domain: agent.samsung.example
+  identifier-namespace: samsung                 # URN NID. 사설(미등록) 네임스페이스
   challenge-ttl: 5m
   credential-ttl: 15m
 ```
@@ -542,9 +562,9 @@ agent-registration:
    `cnf.jkt` 불일치
 6. **등록 멱등성** — 같은 키로 두 번 등록하면 같은 agentId가 나오는가. 다른 키면 다른 agentId가
    나오는가. 이게 깨지면 신원이 자격증명 수명에 끌려다닌다
-7. **식별자 규칙** — `wimse://` 형식으로 조립되는가, 신뢰 도메인 안에서 유일한가, 2048바이트까지
-   파싱하는가. 그리고 **인가 비교가 전체 URI 일치인가** — 경로 접두어로 비교하면
-   `wimse://d/agent/x`가 `wimse://d/agent/xyz`를 통과시키는 우회가 생긴다. 이 음성 테스트를 넣는다
+7. **식별자 규칙** — `urn:samsung:agent:<product>:<uuid>` 형식으로 조립되는가, 네임스페이스
+   안에서 유일한가. 그리고 **인가 비교가 전체 문자열 일치인가** — 접두어로 비교하면
+   `...:agent:x`가 `...:agent:xyz`를 통과시키는 우회가 생긴다. 이 음성 테스트를 넣는다
 
 ### 9.2 기기가 필요한 것
 
@@ -580,7 +600,7 @@ agent-registration:
 ## 11. 완료 기준
 
 1. `server/`가 빌드되고 단위 테스트가 통과한다
-2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `wimse://...` 신원이 보인다
+2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `urn:samsung:agent:...` 신원이 보인다
 3. 그 자격증명으로 `GET /agent/whoami`가 DPoP 검증을 통과하고 같은 agentId를 돌려준다
 4. 앱을 재시작해도 **같은 agentId**가 유지된다. 재등록해도 신원은 바뀌지 않는다
 5. `POST /agent/credential`이 attestation 없이 새 자격증명을 발급한다
@@ -599,5 +619,5 @@ agent-registration:
 | 안드로이드에서 맥의 서버로 닿는 경로 | `adb reverse`. 실기기 검증에서 확인한다 |
 | A36이 TEE 전용이라 StrongBox 수용 경로를 실제로 통과시켜 볼 수 없다 | 거절 쪽만 관찰한다. 수용 경로는 픽스처로 테스트한다 |
 | 서버가 신규 프로젝트라 Spring 스캐폴딩 자체가 한 덩어리 | 안드로이드 때처럼 빈 앱 빌드를 먼저 통과시킨 뒤 코드를 얹는다 |
-| **`wimse://` 스킴이 draft(-03)라 확정 전에 바뀔 수 있다** | 식별자 조립을 한 클래스에 가둔다. 스킴 교체가 한 줄이 되게 한다 |
+| 자체 식별자라 외부 표준과의 상호운용성이 없다 | 지금 연동 대상이 없으므로 비용이 아니다. 생기면 조립 클래스 한 곳만 바꾼다 |
 | 재설치로 폐기를 우회할 수 있다 | 이번 사이클에서는 막을 수 없다. 5.2에 한계로 명시하고 7장의 기기 증명으로 넘긴다 |
