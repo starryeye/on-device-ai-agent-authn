@@ -88,12 +88,29 @@ com.samsung.android.knox.attestation
 | RFC 7591 동적 클라이언트 등록 | 확정 | 형태만 참고 |
 | RFC 8693 토큰 교환 / OBO | 확정 | ②번 |
 | draft-oauth-ai-agents-on-behalf-of-user | draft | ②번 |
-| SPIFFE / WIMSE Workload Identifier | CNCF / draft | **식별자 형식만 차용** |
+| WIMSE Workload Identifier (`wimse://`) | draft (WG) | **식별자 형식 채택** |
+| SPIFFE | CNCF | **쓰지 않음** (사유는 아래) |
 
-**SPIFFE/WIMSE를 채택하지는 않는다.** 두 명세 모두 운영자가 노드를 통제하는 환경을
-전제한다(WIMSE 아키텍처 draft의 워크로드 정의, SPIFFE의 격리 가정). 우리 노드는 사용자의
-폰이고 사용자가 공격자일 수 있다. 다만 **식별자 형식**(`spiffe://trust-domain/path`)과
-**단명 자격증명 자동 갱신** 원칙은 가져올 가치가 있어 차용한다.
+**프레임워크로서의 SPIFFE/SPIRE는 채택하지 않는다.** SPIFFE는 운영자가 노드를 통제하는
+환경을 전제하고 격리 보장을 범위 밖으로 둔다. 우리 노드는 사용자의 폰이고 사용자가 공격자일
+수 있어 전제가 맞지 않는다.
+
+**식별자는 `wimse://` 를 쓴다.** `spiffe://` 스킴을 쓰면서 SPIFFE의 신뢰 모델(trust bundle,
+SVID, Workload API)을 구현하지 않는 것은 오해를 부르는 오용이다. 반면
+[WIMSE Workload Identifier draft](https://datatracker.ietf.org/doc/draft-ietf-wimse-identifier/)는
+`wimse://` 스킴을 따로 정의하고 **독립 사용을 명시적으로 전제**한다 — *"This document does not
+prescribe how identifiers are issued or verified"*. 신뢰 도메인은 불투명 문자열이며 번들이나
+디스커버리를 요구하지 않는다. 우리가 하려는 일과 정확히 맞는다.
+
+채택에 따라 지는 의무는 셋이다.
+
+1. 신뢰 도메인 안에서 식별자가 **유일**해야 한다
+2. 최대 **2048바이트**까지 파싱해야 한다
+3. 인가 판단에서 **전체 URI를 비교**한다. 경로 접두어 비교는 우회 취약점이 되므로 금지한다
+
+draft(-03)이므로 스킴이 바뀔 수 있다. 식별자 조립을 한 곳에 가두어 교체 비용을 한 줄로 만든다.
+
+SPIFFE에서는 **단명 자격증명 자동 갱신** 원칙만 개념으로 가져온다.
 
 ## 3. 주체와 신뢰 경계
 
@@ -130,6 +147,27 @@ com.samsung.android.knox.attestation
 신뢰의 뿌리가 우리 인프라가 아니라는 점이 SPIFFE와 갈리는 지점이다. 우리는 발급자가 아니라
 **검증자**다.
 
+### 3.3 Key Attestation은 Agent Attestation이 아니다
+
+혼동하기 쉬운 지점이라 못박는다. Android가 증명해 주는 것은 이것이다.
+
+> 이 키는 특정 Android 보안 환경에서 생성되었고, 이런 특성(보안 수준, 생성 주체 앱, 부팅
+> 상태)을 갖는다.
+
+Android는 **"이것이 에이전트 A789다"라고 증명하지 않는다.** 그런 개념 자체가 없다. Android가
+제공하는 것은 앱/패키지 신원, 서명 인증서, UID, Keystore, TEE/StrongBox, Key Attestation이며,
+`agent_id`나 `agent credential` 같은 원시 요소는 제공되지 않는다.
+
+따라서 역할은 이렇게 갈린다.
+
+```
+Android          → 키와 실행 환경에 대한 신뢰 증거(evidence)를 준다
+발급 서버(우리)  → 그 증거를 검증하고, 에이전트 신원을 만들어 키에 묶는다
+```
+
+**신원을 만드는 주체는 서버다.** Android는 증거만 준다. 이 구분이 흐려지면 "안드로이드가
+에이전트를 인증해 준다"는 잘못된 기대가 생긴다.
+
 ## 4. 등록 프로토콜
 
 ### 4.1 언제 일어나는가
@@ -147,10 +185,18 @@ com.samsung.android.knox.attestation
 
 ```
 POST /agent/registration/challenge
-→ 200 { "challenge": "<32바이트 base64url>", "expiresIn": 300 }
+→ 200 {
+  "registrationId": "<등록 거래 식별자>",
+  "challenge": "<32바이트 base64url>",
+  "expiresIn": 300
+}
 ```
 
 서버가 저장하고 **1회용**으로 소비한다. 오래된 attestation 체인의 재사용을 막는다.
+
+**`registrationId`와 `agentId`는 다른 것이다.** 전자는 이 등록 시도 하나를 가리키는 **거래
+식별자**로, 실패해도 남고 로그·디버깅에 쓰인다. 후자는 등록이 성공해야 비로소 생기는
+**신원**이다. 둘을 섞으면 실패한 시도가 신원처럼 보이거나, 재시도마다 신원이 늘어난다.
 
 **② 기기가 키 생성**
 
@@ -163,13 +209,20 @@ StrongBox를 먼저 시도하고 `StrongBoxUnavailableException`이면 TEE로 �
 ```
 POST /agent/registration
 {
+  "registrationId": "<①에서 받은 값>",
   "attestationChain": ["<leaf DER base64>", ..., "<root>"],
-  "pop": "<challenge에 대한 JWS, 그 키로 서명>"
+  "pop": "<DPoP 형태 JWS, challenge 포함, 그 키로 서명>",
+  "deviceBinding": null,
+  "playIntegrityToken": null
 }
 ```
 
-체인이 이미 challenge를 품고 있지만 소유 증명(PoP)을 따로 붙인다. 나중에 쓸 DPoP와 같은
-원시 도구를 재사용하는 것이고, 키가 지금 살아 있음을 보인다.
+체인이 이미 challenge를 품고 있지만 소유 증명(PoP)을 따로 붙인다. 키가 지금 살아 있음을
+보이기 위해서다.
+
+**자체 규격을 만들지 않는다.** PoP는 `RFC 9449` DPoP proof와 **같은 형태**로 만든다 — 같은
+JWS 구조, 같은 `htm`/`htu`/`iat`/`jti` 클레임에 challenge를 담는 클레임 하나를 더한다. 서버의
+DPoP 검증기를 그대로 재사용할 수 있고, 검증 로직이 두 벌이 되지 않는다.
 
 **④ 서버가 검증**
 
@@ -190,7 +243,7 @@ POST /agent/registration
 
 ```
 → 200 {
-  "agentId": "spiffe://agent.samsung.example/agent/<package>/<uuid>",
+  "agentId": "wimse://agent.samsung.example/agent/<product>/<uuid>",
   "credential": "<서버 서명 JWT>",
   "expiresIn": 900
 }
@@ -265,27 +318,81 @@ H2 파일 기반. 연구용 저장소에서 외부 DB를 세우게 하면 재현
 
 ```
 agent_identity
-  id                 spiffe URI (PK)
-  jwk_thumbprint     unique  ← 신원의 실질적 키. 등록은 이 값에 대해 멱등
+  id                    wimse:// URI (PK)
+  agent_product_id      어떤 종류의 에이전트인가 (예: galaxy-personal-agent)
+  jwk_thumbprint        unique  ← 신원의 실질적 키. 등록은 이 값에 대해 멱등
   public_key
   package_name
   signing_digest
-  security_level     TRUSTED_ENVIRONMENT | STRONGBOX
-  verified_boot      Verified | SelfSigned | Unverified | Failed
-  device_locked      boolean
-  device_binding     nullable  ← 7장. 이번엔 항상 null
-  subject            nullable  ← ②번에서 사용자가 들어올 자리
+  security_level        TRUSTED_ENVIRONMENT | STRONGBOX
+  verified_boot         Verified | SelfSigned | Unverified | Failed
+  device_locked         boolean
+  integrity_verdict     nullable  ← Play Integrity 결과. 보조 증거
+  device_binding        nullable  ← 7장. 이번엔 항상 null
+  subject               nullable  ← ②번에서 사용자가 들어올 자리
   created_at
-  status             ACTIVE | REVOKED
+  last_authenticated_at ← 마지막 PoP 성공 시각. 휴면 에이전트 식별에 쓴다
+  status                (아래 라이프사이클 참조)
 
 challenge
-  value (PK) | issued_at | expires_at | consumed_at
+  registration_id (PK) | value | issued_at | expires_at | consumed_at
 ```
 
 `device_binding`과 `subject`는 **지금 비워두되 자리를 만든다.** 나중에 스키마를 뜯지 않기
 위해서다.
 
-### 5.2 정책 설정
+**`device_binding`의 역할을 못박는다.** 이것은 **인증 자격이 아니다.** 에이전트 인증은
+`agentId + 키 소유 증명(PoP)`만으로 성립한다. `device_binding`은 두 가지 용도다.
+
+- **정책 입력** — "기기 증명이 없으면 거절" 같은 판단의 재료 (`require-device-binding`)
+- **관계 맥락** — "이 에이전트가 어느 기기에 등록됐는가". 폐기 전파나 기기 단위 정책의 근거
+
+즉 Device ID가 있다고 키가 덜 중요해지지 않고, 키가 있다고 Device ID가 불필요해지지도 않는다.
+답하는 질문이 다르다 — 키는 *이 에이전트가 등록 당시의 키를 쥐고 있는가*, 기기 증명은
+*어느 갤럭시인가*.
+
+### 5.2 신원의 수명과 연속성
+
+`status`는 이번 사이클에서 셋만 쓴다. 나머지 전이는 ②·③번에서 다룬다.
+
+```
+REGISTERED → ACTIVE → REVOKED
+```
+
+**연속성의 기준은 하나다 — 신원은 키다.** 키가 살아 있으면 같은 에이전트이고, 키가 사라지면
+다른 에이전트다. 여기서 아래 표가 전부 도출된다.
+
+| 사건 | 키 | 신원 | 근거 |
+|---|---|---|---|
+| 앱 프로세스 재시작 | 유지 | **같음** | Keystore는 프로세스와 무관 |
+| 기기 재부팅 | 유지 | **같음** | 키는 TEE에 영속 |
+| 앱 업데이트 | 유지 | **같음** | 서명키가 같으면 Keystore 접근 유지 |
+| 앱 재설치 | **소실** | **새 신원** | 앱 삭제 시 Keystore 항목도 삭제 |
+| 공장 초기화 | **소실** | **새 신원** | TEE 초기화 |
+| 키 회전(의도적) | 교체 | **새 신원** | 이번 범위 밖. ②번에서 회전 정책과 함께 |
+
+**앱 업데이트로 신원이 바뀌지 않는 것**이 중요하다. 버전이 올랐다고 새 에이전트가 되면 감사
+기록이 끊기고 폐기가 무의미해진다.
+
+재설치·초기화로 새 신원이 되는 것은 **의도된 동작이되 약점이기도 하다** — 폐기된 에이전트가
+재설치 한 번으로 깨끗한 신원을 받는다. 이 구멍은 기기 증명 없이는 막을 수 없다(7장).
+
+### 5.3 Play Integrity — 보조 증거
+
+Key Attestation이 답하지 못하는 질문이 있다. *앱이 변조되지 않았는가, 구글 플레이가 인정하는
+기기인가, 실행 환경이 정상인가.*
+
+**Play Integrity를 신원으로 쓰지 않는다.** 에이전트 신원은 어디까지나 키에 묶이고, Play
+Integrity는 **정책 판단의 보조 재료**다. 등록 요청에 `playIntegrityToken` 자리를 두고,
+서버는 검증 결과를 `integrity_verdict`에 기록한다.
+
+이번 사이클에서는 **자리와 기록까지만** 한다. 판정을 거절 사유로 쓸지는 정책 손잡이로 두되
+기본값은 끈다. 구글 API 연동이 이 사이클의 무게중심을 흔들면 안 되기 때문이다.
+
+삼성 1st-party 환경이라면 Play Integrity 대신(또는 함께) 삼성 자체 기기·앱 신뢰 증거를 쓸 수
+있다. 7장에 함께 적는다.
+
+### 5.4 정책 설정
 
 ```yaml
 agent-registration:
@@ -295,6 +402,9 @@ agent-registration:
   allowed-packages: [dev.starryeye.ondeviceagent]
   allowed-signing-digests: []                   # 비면 검사하지 않음(개발용)
   require-device-binding: false                 # 7장. 1st-party 배포에서 true 로 올린다
+  require-play-integrity: false                 # 5.3. 이번 사이클 기본 off
+  agent-product-id: galaxy-personal-agent
+  trust-domain: agent.samsung.example
   challenge-ttl: 5m
   credential-ttl: 15m
 ```
@@ -307,6 +417,7 @@ agent-registration:
 |---|---|
 | `identity/AgentKeyStore.kt` | 키 생성(StrongBox→TEE 폴백), 체인 추출, 키 존재 확인 |
 | `identity/DeviceBindingProvider.kt` | **이음매**. 7장 참조. 지금은 `NoDeviceBinding` |
+| `identity/IntegrityTokenProvider.kt` | **이음매**. 5.3 참조. 지금은 `NoIntegrityToken` |
 | `identity/AgentRegistrar.kt` | 등록 흐름 (challenge → 키 → 등록 → 자격증명) |
 | `identity/AgentCredential.kt` | 자격증명 보관과 만료 판단 |
 | `net/DpopSigner.kt` | RFC 9449 proof 생성 |
@@ -338,6 +449,11 @@ device owner 또는 profile owner 자격이 필요하다(구현 시 확인 필�
 제공하지만 KPE 라이선스 영역이다.
 
 **특권/시스템 앱** — 플랫폼 키로 서명되면 위 제약이 대부분 사라진다.
+
+**삼성 자체 무결성 증거** — 5.3의 Play Integrity 자리를 삼성 자체 기기·앱 신뢰 증거로 대체하거나
+병행할 수 있다. 구글 인프라 의존을 줄이고 OEM이 아는 정보(정품 펌웨어 여부 등)를 쓸 수 있다.
+`integrity_verdict` 컬럼과 `require-play-integrity` 손잡이를 **증거 출처와 무관한 이름으로
+두었으므로**, 출처가 바뀌어도 스키마와 정책 구조는 그대로다.
 
 셋 다 **소매 기기에서 재현할 수 없다.** 그래서 이번 사이클의 코드 경로에는 넣지 않는다.
 
@@ -402,6 +518,7 @@ agent-registration:
 | 부팅 검증 실패 | 403 `POLICY_VERIFIED_BOOT` | 재시도 무의미 |
 | 패키지/서명키 불일치 | 403 `POLICY_APPLICATION` | 재시도 무의미 |
 | 기기 증명 없음 (정책이 요구할 때) | 403 `POLICY_DEVICE_BINDING` | 재시도 무의미 |
+| 무결성 판정 미달 (정책이 요구할 때) | 403 `POLICY_INTEGRITY` | 재시도 무의미 |
 | 자격증명 만료 | 401 `CREDENTIAL_EXPIRED` | `POST /agent/credential` 로 갱신 (4.3) |
 | DPoP proof 불량 | 401 `DPOP_INVALID` | proof 재생성 |
 | 키 소실 (재설치) | — | 새로 등록 |
@@ -425,6 +542,9 @@ agent-registration:
    `cnf.jkt` 불일치
 6. **등록 멱등성** — 같은 키로 두 번 등록하면 같은 agentId가 나오는가. 다른 키면 다른 agentId가
    나오는가. 이게 깨지면 신원이 자격증명 수명에 끌려다닌다
+7. **식별자 규칙** — `wimse://` 형식으로 조립되는가, 신뢰 도메인 안에서 유일한가, 2048바이트까지
+   파싱하는가. 그리고 **인가 비교가 전체 URI 일치인가** — 경로 접두어로 비교하면
+   `wimse://d/agent/x`가 `wimse://d/agent/xyz`를 통과시키는 우회가 생긴다. 이 음성 테스트를 넣는다
 
 ### 9.2 기기가 필요한 것
 
@@ -448,11 +568,19 @@ agent-registration:
 - AppFunctions 노출 — 2.1절의 이유로 제외
 - 실제 삼성 계정 연동 — `server/`가 그 역할을 흉내 낼 뿐이다
 - 프로덕션 배포, TLS 인증서 관리, 비밀 관리
+- **관계 기반 신원 모델** — 지금은 `agent_identity` 한 테이블에 `subject`·`device_binding`을
+  컬럼으로 붙인 평면 구조다. User·Device·Agent를 독립 엔티티로 두고 관계를 별도 테이블로 빼는
+  것은 ②번에서 위임이 들어올 때 필요해진다. 그때 마이그레이션한다
+- **기기 폐기 → 에이전트 폐기 전파** — 기기 증명이 없으면 성립하지 않는다(7장). ③번
+- **한 기기·한 앱에 여러 에이전트** — 지금은 키 하나에 에이전트 하나를 가정한다. 다중
+  에이전트는 키 별칭 체계와 `agent_product_id` 조합으로 확장할 수 있으나 이번엔 다루지 않는다
+- **외부 에이전트 페더레이션** — 외부 제공자가 서명한 에이전트 주장을 받아 신원을 연합하는
+  구조. 우리가 통제하지 않는 에이전트를 다루는 별개 주제다
 
 ## 11. 완료 기준
 
 1. `server/`가 빌드되고 단위 테스트가 통과한다
-2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `spiffe://...` 신원이 보인다
+2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `wimse://...` 신원이 보인다
 3. 그 자격증명으로 `GET /agent/whoami`가 DPoP 검증을 통과하고 같은 agentId를 돌려준다
 4. 앱을 재시작해도 **같은 agentId**가 유지된다. 재등록해도 신원은 바뀌지 않는다
 5. `POST /agent/credential`이 attestation 없이 새 자격증명을 발급한다
@@ -471,3 +599,5 @@ agent-registration:
 | 안드로이드에서 맥의 서버로 닿는 경로 | `adb reverse`. 실기기 검증에서 확인한다 |
 | A36이 TEE 전용이라 StrongBox 수용 경로를 실제로 통과시켜 볼 수 없다 | 거절 쪽만 관찰한다. 수용 경로는 픽스처로 테스트한다 |
 | 서버가 신규 프로젝트라 Spring 스캐폴딩 자체가 한 덩어리 | 안드로이드 때처럼 빈 앱 빌드를 먼저 통과시킨 뒤 코드를 얹는다 |
+| **`wimse://` 스킴이 draft(-03)라 확정 전에 바뀔 수 있다** | 식별자 조립을 한 클래스에 가둔다. 스킴 교체가 한 줄이 되게 한다 |
+| 재설치로 폐기를 우회할 수 있다 | 이번 사이클에서는 막을 수 없다. 5.2에 한계로 명시하고 7장의 기기 증명으로 넘긴다 |
