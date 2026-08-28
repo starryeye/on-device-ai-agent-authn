@@ -1,6 +1,7 @@
 package dev.starryeye.agentidentity.policy
 
 import dev.starryeye.agentidentity.attestation.AttestationResult
+import jakarta.annotation.PostConstruct
 import org.springframework.stereotype.Component
 
 /**
@@ -12,6 +13,19 @@ import org.springframework.stereotype.Component
  */
 @Component
 class RegistrationPolicy(private val properties: PolicyProperties) {
+
+  /**
+   * `requireSecurityLevel` 이 파싱 가능한 값인지 기동 시점에 미리 확인한다.
+   *
+   * 이 검사가 없으면 오타 하나가 등록 요청 한가운데서야 [IllegalArgumentException] 으로
+   * 드러난다 — 그 사이 내려진 모든 등록 판단이 "설정 오류"인지 "정당한 거절"인지 구분할
+   * 수 없게 된다는 뜻이다. 스프링이 이 빈을 만들 때만 호출되므로, 이 클래스를 스프링 밖에서
+   * 직접 생성해 오작동 설정값을 의도적으로 검증하는 테스트에는 영향을 주지 않는다.
+   */
+  @PostConstruct
+  fun validateConfiguration() {
+    parseSecurityLevel(properties.requireSecurityLevel)
+  }
 
   fun evaluate(
       attestation: AttestationResult.Verified,

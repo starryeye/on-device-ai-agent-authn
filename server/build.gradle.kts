@@ -41,6 +41,11 @@ dependencies {
   // implementation 으로만 선언해 전이되지 않으므로 직접 추가한다.
   implementation("com.google.code.gson:gson:2.11.0")
   runtimeOnly("com.h2database:h2")
+  // Spring Data JPA 가 코틀린 엔티티(AgentIdentity)의 영속 생성자를 찾을 때 코틀린 리플렉션으로
+  // 넘어간다(PreferredConstructorDiscoverer). 이 라이브러리가 없으면 컨텍스트 기동이
+  // NoClassDefFoundError(kotlin/reflect/full/KClasses)로 죽는다. 서브모듈이 이미 고정한
+  // 코틀린 버전(2.2.0)에 맞춘다.
+  runtimeOnly("org.jetbrains.kotlin:kotlin-reflect:2.2.0")
 
   testImplementation("org.springframework.boot:spring-boot-starter-test")
   // AttestationVerifierTest 가 "신뢰 앵커와 무관한 자기서명 인증서"를 직접 만들어 실제
