@@ -53,4 +53,24 @@ class ChallengeStoreTest {
 
     assertThat(store.consume(challenge.registrationId)).isEqualTo(challenge.value)
   }
+
+  @Test
+  fun `소비되지_않은_만료_challenge는_다음_issue_에서_쓸려나간다`() {
+    val properties = PolicyProperties().apply { challengeTtl = Duration.ofMinutes(5) }
+    val clock = MutableClock(Instant.parse("2026-08-28T00:00:00Z"))
+    val store = ChallengeStore(properties, clock)
+
+    // 아무도 소비하지 않는 challenge 를 여러 번 발급한다 (예: /challenge 를 반복 호출하는
+    // 인증 없는 호출자). 청소가 없으면 이 항목들은 영원히 맵에 남는다.
+    repeat(5) { store.issue() }
+    assertThat(store.issuedCount()).isEqualTo(5)
+
+    // TTL 을 넘겨서 시계를 밀고 새 challenge 를 하나 더 발급한다.
+    clock.advanceTo(Instant.parse("2026-08-28T00:05:01Z"))
+    store.issue()
+
+    // 청소가 없으면 6 (쌓인 5 + 새로 발급된 1) 이 된다. 청소가 있으면 만료된 5 개가
+    // 걷혀나가고 방금 발급한 1 개만 남는다.
+    assertThat(store.issuedCount()).isEqualTo(1)
+  }
 }

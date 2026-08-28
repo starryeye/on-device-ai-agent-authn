@@ -28,16 +28,21 @@ class ChallengeStore(
   private val random = SecureRandom()
 
   fun issue(): Challenge {
+    val now = clock.instant()
+    // 만료됐지만 소비되지 않은 challenge 는 consume() 을 거치지 않으므로 여기서 쓸어낸다.
+    // 이 엔드포인트는 인증 없이 누구나 호출할 수 있어, 청소가 없으면 반복 호출만으로 맵이
+    // 무한히 자란다.
+    issued.entries.removeIf { it.value.expiresAt.isBefore(now) }
+
     val value = ByteArray(32)
     random.nextBytes(value)
-    val challenge =
-        Challenge(
-            UUID.randomUUID().toString(),
-            value,
-            clock.instant().plus(properties.challengeTtl))
+    val challenge = Challenge(UUID.randomUUID().toString(), value, now.plus(properties.challengeTtl))
     issued[challenge.registrationId] = challenge
     return challenge
   }
+
+  /** 테스트가 맵 크기를 직접 관찰할 수 있게 한다. */
+  internal fun issuedCount(): Int = issued.size
 
   /** 소비하면 사라진다. 만료된 것도 사라진다. */
   fun consume(registrationId: String): ByteArray? {
