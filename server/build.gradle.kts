@@ -1,5 +1,7 @@
 plugins {
   java
+  kotlin("jvm") version "2.2.0"
+  kotlin("plugin.spring") version "2.2.0"
   id("org.springframework.boot") version "4.1.1"
   id("io.spring.dependency-management") version "1.1.7"
 }
@@ -9,6 +11,7 @@ version = "0.1.0"
 
 // Java 21: 공식 검증 라이브러리가 21 툴체인을 요구한다.
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+kotlin { jvmToolchain(21) }
 
 // google() 는 서브모듈(keyattestation)의 전이 의존성(androidx.annotation 등) 해석에 필요하다.
 // Gradle 컴포지트 빌드에서는 의존성을 해석하는 프로젝트(여기서는 루트)의 저장소만 쓰이고,
