@@ -7,11 +7,30 @@
 | 디렉터리 | 상태 | 내용 |
 |---|---|---|
 | `android/` | 구현됨 | ADK for Android 온디바이스 에이전트 샘플 앱 |
-| `server/` | 예정 | 인증 서버 |
+| `server/` | 구현됨 | 에이전트 신원 발급 서버 — Key Attestation 체인 검증 + 정책 + DPoP 자격증명 |
 | `docs/superpowers/` | — | 설계 문서와 구현 계획 |
 
 `android/`와 `server/`는 각각 독립된 Gradle 루트다. 안드로이드 빌드와 서버 빌드가
 서로 간섭하지 않게 하려는 것이다.
+
+## 인증 연구의 세 사이클
+
+이 저장소는 온디바이스 에이전트에 인증을 붙이는 문제를 세 단계로 나눠 다룬다.
+
+1. **① 에이전트 신원** — 에이전트가 하드웨어(Android Keystore)에 묶인 자기 신원을 갖는다.
+   `server/`가 Key Attestation 체인을 검증해 그 신원을 발급하고, `android/`의 클라이언트가
+   키를 만들어 등록하고 재시작 간에 재사용한다. **완료** — 자동화 테스트는 서버 56개,
+   안드로이드 12개가 모두 통과한다. 다만 실기기에서의 종단 간 검증(등록 → 재시작 →
+   자격증명 갱신)은 아직 기기 연결 후 확인이 필요한 상태(pending)다. 설계:
+   [docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md](docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md),
+   운영 문서: [server/README.md](server/README.md)
+2. **② 사용자 위임** — 에이전트가 "누구를 대신해" 행동하는지(`act` 클레임, OBO 패턴)를 신원에
+   싣는다. 아직 시작 전.
+3. **③ 행동별 인가** — 신원과 위임이 갖춰진 다음, 에이전트가 시도하는 개별 행동(툴 호출)마다
+   무엇을 허용할지 판단한다(step-up 인증 포함). 아직 시작 전.
+
+①이 끝나야 ②·③이 의미를 갖는다 — 위임도 행동별 인가도 "누가 요청했는가"가 먼저 확정돼야
+하기 때문이다.
 
 ## 왜 LiteRT-LM인가
 
@@ -25,6 +44,9 @@ Gemini Nano로 옮기고 싶어지면 모델 백엔드만 교체하면 된다. �
 
 ## 문서
 
-- [설계](docs/superpowers/specs/2026-08-26-on-device-adk-agent-design.md)
-- [구현 계획](docs/superpowers/plans/2026-08-26-on-device-adk-agent.md)
+- [설계 — 온디바이스 ADK 에이전트](docs/superpowers/specs/2026-08-26-on-device-adk-agent-design.md)
+- [구현 계획 — 온디바이스 ADK 에이전트](docs/superpowers/plans/2026-08-26-on-device-adk-agent.md)
 - [앱 실행 방법](android/README.md)
+- [설계 — 에이전트 신원 등록 (사이클 ①)](docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md)
+- [구현 계획 — 에이전트 신원 등록](docs/superpowers/plans/2026-08-28-agent-identity-registration.md)
+- [서버 실행 방법](server/README.md)

@@ -315,6 +315,16 @@ POST /agent/registration/challenge
 
 서버가 저장하고 **1회용**으로 소비한다. 오래된 attestation 체인의 재사용을 막는다.
 
+**저장소는 크기 상한이 있다(`max-pending-challenges`, 기본 10,000).** 만료된 challenge는
+시간이 지나야 청소되는데, 이 엔드포인트는 인증이 없어 그 사이 홍수처럼 반복 호출하면 맵이
+무한히 자랄 수 있다. 상한에 닿으면 **아직 살아있는(유효한) challenge를 밀어내 자리를
+만드는 대신, 새 발급 자체를 `503 CHALLENGE_STORE_FULL`로 거절한다**(§8) — 살아있는
+challenge를 밀어내면 그것으로 막 등록을 마치려던 정상 사용자를 튕겨내게 되기 때문이다.
+런타임 DPoP의 `jti` 재생 방지 캐시(`JwsProofVerifier`)도 같은 이유로 같은 원칙을 따른다 —
+크기 상한(기본 10,000)에 닿으면 새 `jti` 기억 쪽을 거절하지, 기존에 기억해 둔 `jti`를
+밀어내지 않는다. 살아있는 항목을 밀어내는 순간 그 항목이 막고 있던 재생이 바로 열리기
+때문이다.
+
 **`registrationId`와 `agentId`는 다른 것이다.** 전자는 이 등록 시도 하나를 가리키는 **거래
 식별자**로, 실패해도 남고 로그·디버깅에 쓰인다. 후자는 등록이 성공해야 비로소 생기는
 **신원**이다. 둘을 섞으면 실패한 시도가 신원처럼 보이거나, 재시도마다 신원이 늘어난다.
@@ -387,6 +397,21 @@ JWS 구조, 같은 `htm`/`htu`/`iat`/`jti` 클레임에 challenge를 담는 클�
 따라서 `require-verified-boot: false`로 내리면 **앱 신원 검사도 함께 무의미해진다.** 설정을
 낮출 때 무엇이 같이 무너지는지 알고 낮춰야 한다.
 
+**PoP 검증 — 체인 다음, 정책 판단 앞**
+
+체인 검증으로 attested 공개키를 얻은 다음에야 PoP를 확인할 수 있다 — 서명자를 비교할
+대상이 그제서야 생기기 때문이다. 셋이 모두 맞아야 통과한다.
+
+1. proof 자체가 유효하다 — `typ`이 `agent-reg-pop+jwt`이고, JWS 서명이 proof의 JWK로
+   검증되고, `htm`/`htu`가 이 요청과 일치하고, `iat`가 허용 오차 안이고, `jti`가 재생되지
+   않았다
+2. proof에 담긴 JWK의 RFC 7638 지문이 **방금 체인에서 뽑은 attested 키의 지문과 같다** —
+   다르면 체인은 훔쳤지만 다른 키로 서명한 경우다
+3. proof의 `challenge` 클레임이 **이 등록 거래에서 소비한 challenge와 같다** — 이 확인이
+   없으면 한 등록 거래용으로 만든 유효한 proof를 challenge만 다른 거래에 들이밀 수 있다
+
+셋 중 하나라도 어긋나면 `403 POP_INVALID`다(§8).
+
 **⑤ 서버가 신원 발급**
 
 ```
@@ -416,8 +441,9 @@ JWT는 `iss`(발급 서버), `aud`(대상 리소스 서버), `sub`(agentId), `cn
 있으면 **같은 agentId를 그대로 돌려주고** 자격증명만 새로 발급한다. 없을 때만 새 agentId를
 만든다. 그래서 재등록해도 신원은 바뀌지 않는다.
 
-새 agentId가 생기는 경우는 하나뿐이다 — **키가 바뀔 때**(앱 재설치 등). 새 설치본은 새 에이전트
-인스턴스이므로 의도된 동작이다.
+새 agentId가 생기는 경우는 하나뿐이다 — **키가 바뀔 때**(앱 재설치, 공장 초기화, 그리고
+attestation이 너무 오래돼 재등록해야 할 때 — §4.3). 새 키는 새 에이전트 인스턴스를 뜻하므로
+의도된 동작이다.
 
 ### 4.3 자격증명 갱신
 
@@ -430,7 +456,19 @@ DPoP: <RFC 9449 proof, 에이전트 키로 서명>
 → 200 { "agentId": "...", "credential": "...", "expiresIn": 900 }
 ```
 
-서버는 proof를 검증하고 그 키 지문으로 신원을 찾는다. `ACTIVE`면 자격증명을 새로 발급한다.
+서버는 proof를 검증하고 그 키 지문으로 신원을 찾는다. 여기서 결과가 셋으로 갈린다.
+
+| 상태 | 의미 | 응답 |
+|---|---|---|
+| proof 자체가 불량 | 서명·`typ`·`htm`/`htu`·`iat` 오차·`jti` 재생 중 하나가 걸렸다 | `401 DPOP_INVALID` |
+| proof는 유효하지만 그 지문으로 등록된 신원이 없다 | 이 키를 지금 쥐고 있다는 것은 맞지만, 이 키로 등록한 적이 없다 | `401 AGENT_NOT_FOUND` |
+| 신원은 있지만 `ACTIVE`가 아니다 | 관리자가 비활성화했다고 가정한다(지금은 이 상태를 만드는 경로가 없다) | `401 AGENT_INACTIVE` |
+| 신원이 있고 `ACTIVE`다 | 정상 | 자격증명 발급 |
+
+`AGENT_NOT_FOUND`와 `AGENT_INACTIVE`를 굳이 나누는 이유는 클라이언트가 이 둘에 다르게
+반응해야 하기 때문이다(§8) — 전자는 재등록해도 안전하고(proof가 방금 검증한 진짜 키
+소유 증명이므로), 후자를 전자와 섞으면 비활성화된 신원이 새 키로 재등록해 비활성화를 그냥
+우회하게 된다.
 
 **갱신에는 상한이 있다.** 등록 시점에 부팅이 검증된 기기였더라도 이후 언락·루팅될 수 있는데,
 attestation은 등록 때 한 번뿐이므로 서버는 그 변화를 영원히 모른다. 갱신만으로 무기한 연장되는
@@ -440,13 +478,28 @@ attestation은 등록 때 한 번뿐이므로 서버는 그 변화를 영원히 
   max-attestation-age: 7d   # 초과하면 갱신을 거부하고 재등록을 요구한다
 ```
 
-초과 시 `401 REATTESTATION_REQUIRED`를 돌려주고, 클라이언트는 ①부터 다시 밟는다. 키는 그대로
-재사용하므로 **신원은 유지된다**(등록 멱등성).
-**체인 검증도 challenge도 필요 없다** — 등록 시점에 이미 검증했고, 그 키를 지금 쥐고 있다는
-사실이 proof로 증명되기 때문이다.
+초과 시 `401 REATTESTATION_REQUIRED`를 돌려주고, 클라이언트는 ①부터 다시 밟는다. **이때
+기존 키를 재사용할 수 없다.** `setAttestationChallenge`는 `KeyGenParameterSpec`에만 존재해
+키를 만드는 시점에만 걸 수 있고, 이미 만들어진 Keystore 키를 새 challenge로 다시 attest하는
+API는 안드로이드에 없다. 그래서 재-attestation은 **새 키를 만드는 것**과 같은 말이고, 체인
+검증도 challenge도 다시 필요하다 — ①~④를 처음부터 새 키로 다시 밟는다는 뜻이다.
 
-이 구조에서 **오래가는 자격증명은 하드웨어 키이고, JWT는 그것에 묶인 단명 토큰**이다. DPoP
-검증은 `whoami`에도 어차피 필요하므로 추가 비용이 거의 없다.
+**새 키는 새 신원이다.** 서버는 키 지문으로 신원을 찾으므로(§4.2⑤), 새 키로 들어온 등록은
+기존 신원과 이어지지 않고 **새 agentId**를 받는다. 이는 앱 재설치·공장 초기화로 신원이
+바뀌는 것(§5.2)과 같은 이유이며, 이 설계의 "신원은 키다" 원칙에서 그대로 도출된다 — 키가
+그대로면 같은 신원이고, 키가 바뀌면 다른 신원이다. `max-attestation-age`가 하는 일은 "그
+키를 얼마나 오래 같은 신원으로 인정할지"를 정하는 것이지, 만료 후에도 신원을 이어 붙여 주는
+것이 아니다.
+
+사용자 입장에서 끊기지 않는 것은 **대화**이지 신원이 아니다 — 클라이언트는 이 재등록을
+백그라운드에서 자동으로 수행하고(§6, `AgentRegistrar.ensureIdentity`), 화면에는 새 신원이
+발급됐다는 시스템 줄만 보인다.
+
+이 구조에서 자격증명 갱신(위의 정상 경로)은 하드웨어 키 자체를 자격증명으로 쓰지만, 그
+자격이 무기한은 아니다 — 유효한 동안은 **오래가는 자격증명은 하드웨어 키이고, JWT는 그것에
+묶인 단명 토큰**이지만, `max-attestation-age`를 넘기면 그 키 자체가 더 이상 신원을 연장하는
+근거가 되지 못하고 새 키·새 신원으로 넘어간다. DPoP 검증은 `whoami`에도 어차피 필요하므로
+추가 비용이 거의 없다.
 
 ### 4.4 자격증명 사용
 
@@ -456,8 +509,17 @@ Authorization: DPoP <credential>
 DPoP: <RFC 9449 proof JWS>
 ```
 
-서버는 proof의 `htm`/`htu`/`iat`/`jti`를 검증하고, proof를 서명한 키의 지문이 토큰의
-`cnf.jkt`와 일치하는지 확인한다. 일치하면 agentId를 돌려준다.
+서버는 proof의 `htm`/`htu`/`iat`/`jti`를 검증하고, 그 서명자 지문으로 등록된 신원을 찾는다.
+찾으면 agentId를 돌려준다.
+
+**이 사이클의 구현은 `Authorization` 헤더(위의 `<credential>`)를 읽지 않는다.** 인증은
+DPoP proof 하나로 완결된다 — proof 서명자 지문을 `agent_identity.jwk_thumbprint`에 직접
+대조할 뿐, `cnf.jkt`를 credential과 맞대 보거나 credential의 `exp`를 검사하는 코드는 없다.
+`/agent/credential`(§4.3)도 같은 방식이다. 결과적으로 credential은 지금은 "발급된 문서"
+이상의 역할이 없고, 실제 접근 통제는 전적으로 DPoP 키 소유 증명이 담당한다. 이 자격증명을
+실제로 소비하는 리소스 서버는 아직 없으므로(이번 사이클은 신원 발급까지다), 이 사실이 지금
+당장 구멍은 아니지만, `cnf.jkt` 바인딩과 credential 만료가 이번 사이클에서 **아직 강제되지
+않는다는 점은 명시해 둔다.**
 
 ## 5. 서버 구조
 
@@ -473,8 +535,11 @@ Java 17이 아니라 21인 이유는 공식 검증 라이브러리가 Java 21 �
 | `policy` | 수용/거절 판단 + 사유 | 어디서 불리는지 모름 |
 | `registration` | challenge 발급, 등록 오케스트레이션 | 검증 방법을 모름 |
 | `identity` | 신원 저장, 자격증명 발급, **식별자 조립(한 클래스)** | attestation을 모름 |
-| `dpop` | RFC 9449 proof 검증 | 도메인을 모름 |
+| `proof` | RFC 9449 DPoP proof와 등록 PoP를 함께 검증(`JwsProofVerifier`) — `typ`으로 용도를 가른다(§4.2③) | 도메인을 모름 |
 | `api` | 엔드포인트 | 위를 조립만 |
+
+(구현 패키지명은 `dpop`이 아니라 `proof`다 — 등록 PoP와 런타임 DPoP를 한 검증기가 함께
+다루므로, DPoP 하나만 가리키는 이름보다 그 관계를 더 정확히 담는다.)
 
 가장 두꺼운 곳은 `attestation`이다. **다만 직접 짜는 것을 기본값으로 두지 않는다.**
 
@@ -553,6 +618,7 @@ ACTIVE → REVOKED
 | 앱 업데이트 | 유지 | **같음** | 서명키가 같으면 Keystore 접근 유지 |
 | 앱 재설치 | **소실** | **새 신원** | 앱 삭제 시 Keystore 항목도 삭제 |
 | 공장 초기화 | **소실** | **새 신원** | TEE 초기화 |
+| attestation 노후 (`max-attestation-age` 초과) | **교체** (재등록이 새 키를 만든다) | **새 신원** | 기존 키를 새 challenge로 재-attest할 API가 없다(§4.3) |
 | 키 회전(의도적) | 교체 | **새 신원** | 이번 범위 밖. ②번에서 회전 정책과 함께 |
 
 **앱 업데이트로 신원이 바뀌지 않는 것**이 중요하다. 버전이 올랐다고 새 에이전트가 되면 감사
@@ -578,13 +644,15 @@ Integrity는 **정책 판단의 보조 재료**다. 등록 요청에 `playIntegr
 
 ### 5.4 정책 설정
 
+아래는 실제로 구현된 `PolicyProperties`(`agent-registration.*`)의 전체 손잡이다.
+운영 방법과 각 손잡이가 무엇을 증명하는지는 `server/README.md`에 정리한다.
+
 ```yaml
 agent-registration:
   require-security-level: TRUSTED_ENVIRONMENT   # STRONGBOX 로 올리면 A36은 거절된다
   require-verified-boot: true
   require-device-locked: true
   allowed-packages: [dev.starryeye.ondeviceagent]
-  allowed-signing-digests: []                   # 비면 검사하지 않음(개발용)
   require-device-binding: false                 # 7장. 1st-party 배포에서 true 로 올린다
   require-play-integrity: false                 # 5.3. 이번 사이클 기본 off
   agent-product-id: galaxy-personal-agent
@@ -592,29 +660,55 @@ agent-registration:
   challenge-ttl: 5m
   credential-ttl: 15m
   max-attestation-age: 7d                       # 4.3. 초과 시 재등록 요구
-  dpop:
-    iat-skew: 60s                               # RFC 9449 는 값을 정하지 않는다. 우리가 정한다
-    jti-cache-ttl: 120s                         # 허용 창의 두 배
-  attestation:
-    roots-url: https://android.googleapis.com/attestation/root
-    crl-url: https://android.googleapis.com/attestation/status
-    require-crl-check: true                     # 2.4. 끄면 하드웨어 보증의 근거가 사라진다
+  max-pending-challenges: 10000                 # ChallengeStore 상한. 넘으면 503 CHALLENGE_STORE_FULL
 ```
+
+**설계 초안과 실제 구현이 갈린 지점을 남긴다.**
+
+- `allowed-signing-digests`는 구현되지 않았다. `AttestationResult.Verified.signingDigests`로
+  서명 다이제스트를 뽑아 오기는 하지만, `PolicyProperties`에 그 값을 검사할 손잡이가 없다 —
+  `RegistrationPolicy.evaluate`는 패키지명(`allowedPackages`)만 검사하고 서명 다이제스트는
+  아무 데도 비교하지 않는다.
+- `dpop.iat-skew`/`dpop.jti-cache-ttl`은 설정으로 노출되지 않았다. `JwsProofVerifier`의
+  허용 오차는 `ServerApplication`의 빈 정의에 `Duration.ofSeconds(60)`으로 **하드코딩**돼
+  있고, `jti` 캐시 상한(`maxSeenJti`, 기본 10,000)도 생성자 기본값이다.
+- `attestation.roots-url`/`crl-url`/`require-crl-check`도 설정으로 노출되지 않았다.
+  `AttestationConfiguration`이 두 URL을 상수로 고정해 두었고, CRL 확인은 끌 수 있는 손잡이
+  없이 항상 실행된다(§2.4의 "열어두면 우회가 된다"는 원칙을 코드가 아예 켜둔 채로 못박은
+  셈이다).
+
+셋 다 이번 사이클에서 실험 대상이 아니었던 값들이라 손잡이로 뺄 이유가 적었다는 점에서
+의도적인 축소로 볼 수 있지만, 설계 문서만 보고 `application.yml`에 이 키들을 적어 넣으면
+아무 효과가 없다는 사실은 분명히 해 둔다.
 
 ## 6. 클라이언트 구조 (Android)
 
-기존 앱에 패키지 하나를 더한다.
+기존 앱에 패키지 하나를 더한다. 아래는 실제로 구현된 파일이다(초안에서 이름이 몇 개
+바뀌었다 — 예: `net/DpopSigner.kt` → `identity/JwsProofSigner.kt`, `AgentCredential.kt`는
+`AgentIdentityState.kt`로 대체).
 
 | 파일 | 책임 |
 |---|---|
-| `identity/AgentKeyStore.kt` | 키 생성(StrongBox→TEE 폴백), 체인 추출, 키 존재 확인 |
+| `identity/AgentKeyStore.kt` | 키 생성(StrongBox→TEE 폴백), 체인 추출, 키 존재 확인. 재등록 시 기존 키를 지우고 새로 만든다 |
 | `identity/DeviceBindingProvider.kt` | **이음매**. 7장 참조. 지금은 `NoDeviceBinding` |
 | `identity/IntegrityTokenProvider.kt` | **이음매**. 5.3 참조. 지금은 `NoIntegrityToken` |
-| `identity/AgentRegistrar.kt` | 등록 흐름 (challenge → 키 → 등록 → 자격증명) |
-| `identity/AgentCredential.kt` | 자격증명 보관과 만료 판단 |
-| `net/DpopSigner.kt` | RFC 9449 proof 생성 |
+| `identity/AgentRegistrar.kt` | 신원 확립 흐름 전체 (`ensureIdentity`) — 아래 참조 |
+| `identity/AgentIdentityState.kt` | 신원 확립 결과(`Registering`/`Registered`/`Failed`)와 `RegistrationOrigin` |
+| `identity/JwsProofSigner.kt` | 등록 PoP(`typ: agent-reg-pop+jwt`)와 런타임 DPoP(`typ: dpop+jwt`) 서명 생성 |
+| `identity/EcdsaSignature.kt` | Keystore가 내는 DER 서명을 JOSE(R‖S) 형식으로 변환 |
 
-`AgentViewModel`은 모델 로드와 나란히 등록을 시작하고, 결과를 시스템 메시지로 표시한다.
+**시작 흐름(`AgentRegistrar.ensureIdentity`)은 넷으로 갈린다.**
+
+1. **키가 없다** → 새로 등록한다(`FIRST_RUN`). challenge → 키 생성 → 체인+PoP 제출 → 신원 수령.
+2. **키가 있다** → attestation을 다시 하지 않고 `POST /agent/credential`로 자격증명만
+   갱신한다(`REUSED`). 재시작해도 같은 신원이 유지되는 경로가 이것이다.
+3. 그 갱신이 **`REATTESTATION_REQUIRED`**(attestation이 `max-attestation-age`를 넘었다) 또는
+   **`AGENT_NOT_FOUND`**(이 키로 등록된 신원이 없다 — 등록 도중 죽었던 경우의 복구)로
+   거절된다 → 새 키를 만들어 1번과 같은 절차로 다시 등록한다. 둘 다 **새 신원**이 된다.
+4. 그 밖의 거절 사유(`DPOP_INVALID`, `AGENT_INACTIVE` 등) → 재등록을 시도하지 않고 그대로
+   실패로 보고한다.
+
+`AgentViewModel`은 모델 로드와 나란히 이 흐름을 시작하고, 결과를 시스템 메시지로 표시한다.
 등록 실패가 채팅을 막지는 않는다 — 이번 사이클에서 자격증명을 쓰는 툴이 없기 때문이다.
 
 ## 7. 1st-party 경로 — 열렸을 때 무엇을 해야 하는가
@@ -701,23 +795,53 @@ agent-registration:
 
 거절에는 **반드시 사유 코드를 붙인다.** "거절됨"만으로는 아무것도 배우지 못한다.
 
+**등록(`/agent/registration`)의 거절은 전부 403이다.** 사유가 챌린지 문제든 체인 문제든
+정책 문제든, 인증되지 않은 이 엔드포인트가 상태 코드로 원인의 성격을 흘리지 않도록 모양을
+통일했다 — 이유는 사유 코드(`reason` 필드)로만 구분한다. 반면 갱신·조회(`/agent/credential`,
+`/agent/whoami`)는 이미 발급된 자격의 유효성을 다투는 자리이므로 401로 통일된다.
+
 | 상황 | 응답 | 클라이언트 동작 |
 |---|---|---|
-| challenge 만료/재사용 | 400 `CHALLENGE_INVALID` | ①부터 재시도 |
+| challenge 만료/재사용 | 403 `CHALLENGE_INVALID` | ①부터 재시도 |
 | 체인 서명 검증 실패 | 403 `CHAIN_UNTRUSTED` | 재시도 무의미 |
 | 루트가 알려진 구글 루트 집합에 없음 | 403 `CHAIN_UNTRUSTED` | 재시도 무의미 |
 | 체인 인증서가 CRL에 등재됨 | 403 `CHAIN_REVOKED` | 재시도 무의미 |
 | RKP 인증서 만료 | 403 `CHAIN_EXPIRED` | 키를 새로 만들어 재등록 |
-| PoP 의 `typ` 불일치 | 400 `POP_INVALID` | proof 재생성 |
+| PoP 검증 실패 (서명·`typ`·`htm`/`htu`·`iat` 오차·`jti` 재생 중 하나, 또는 서명자 지문이 방금 검증한 attested 키와 다름, 또는 `challenge` 클레임이 이 등록 거래의 challenge와 다름) | 403 `POP_INVALID` | proof를 다시 만들어 재시도. 원인이 challenge 재사용이면 ①부터 |
 | 보안 수준 미달 | 403 `POLICY_SECURITY_LEVEL` | 재시도 무의미 |
 | 부팅 검증 실패 | 403 `POLICY_VERIFIED_BOOT` | 재시도 무의미 |
+| 기기 잠금 해제 상태 | 403 `POLICY_DEVICE_LOCKED` | 재시도 무의미 |
 | 패키지/서명키 불일치 | 403 `POLICY_APPLICATION` | 재시도 무의미 |
 | 기기 증명 없음 (정책이 요구할 때) | 403 `POLICY_DEVICE_BINDING` | 재시도 무의미 |
 | 무결성 판정 미달 (정책이 요구할 때) | 403 `POLICY_INTEGRITY` | 재시도 무의미 |
-| 자격증명 만료 | 401 `CREDENTIAL_EXPIRED` | `POST /agent/credential` 로 갱신 (4.3) |
-| attestation 이 너무 오래됨 | 401 `REATTESTATION_REQUIRED` | ①부터 재등록 (신원은 유지) |
-| DPoP proof 불량 | 401 `DPOP_INVALID` | proof 재생성 |
-| 키 소실 (재설치) | — | 새로 등록 |
+| challenge 발급이 대기 상한(`maxPendingChallenges`)을 넘음 | 503 `CHALLENGE_STORE_FULL` | 잠시 뒤 재시도 |
+| 자격증명 만료 | 401 `CREDENTIAL_EXPIRED` | `POST /agent/credential` 로 갱신 (§4.3) |
+| attestation 이 너무 오래됨 | 401 `REATTESTATION_REQUIRED` | 새 키로 ①부터 재등록 (**새 신원**) |
+| DPoP proof 자체가 불량 (서명·`typ`·`htm`/`htu`·`iat` 오차·`jti` 재생) | 401 `DPOP_INVALID` | proof 재생성 |
+| proof는 유효하지만 그 서명자 지문으로 등록된 신원이 없음 | 401 `AGENT_NOT_FOUND` | 새 키로 ①부터 재등록 (**새 신원**). 등록 도중(체인 제출 전후) 죽어 키만 만들어지고 서버에는 남지 않은 경우를 복구한다 — 방금 검증된 진짜 키 소유 증명이므로 재등록해도 안전하다 |
+| 신원은 있으나 `ACTIVE`가 아님 | 401 `AGENT_INACTIVE` | 재시도도 재등록도 하지 않는다. `AGENT_NOT_FOUND`와 합치면 비활성화된 신원이 새 키로 재등록해 비활성화를 그냥 우회하게 된다 |
+| 키 소실 (재설치, 공장 초기화) | — | 새로 등록 |
+
+`CHAIN_UNTRUSTED`·`CHAIN_REVOKED`·`CHAIN_EXPIRED`·`POP_INVALID`·`DPOP_INVALID`처럼 서로
+다른 사유 코드를 나눠 둔 이유는 하나다 — 이 서버는 정책을 바꿔가며 무엇이 왜 거절되는지
+관찰하는 연구용 도구이고, 사유를 뭉개면 그 관찰이 성립하지 않는다.
+
+**다만 지금 구현에서 이 원칙이 완전히 지켜지지는 않는다.** `RegistrationService`는 체인
+검증 실패를 `ChallengeMismatch`(→ `CHALLENGE_INVALID`) 한 갈래만 구분해 내고, 그 밖의 모든
+체인 거절 — 신뢰할 수 없는 서명, 알 수 없는 루트, **CRL 등재, RKP 만료 포함** — 은 전부
+`CHAIN_UNTRUSTED`로 뭉뚱그려 돌아간다. `CHAIN_REVOKED`·`CHAIN_EXPIRED`는 사유 코드
+열거형에는 선언돼 있지만, 이 서버의 어떤 경로도 아직 실제로 반환하지 않는다. 마찬가지로
+`CREDENTIAL_EXPIRED`도 선언만 돼 있고 반환하는 경로가 없다 — `/agent/whoami`와
+`/agent/credential`은 `Authorization` 헤더(발급된 credential JWT)를 아예 읽지 않고 DPoP
+proof의 서명자 지문만으로 신원을 찾으므로, `cnf.jkt` 대조도 credential의 `exp` 검사도
+이 두 엔드포인트에서 일어나지 않는다. 이 표는 **설계 의도**를 적은 것이며, 위 세 사유
+코드가 실제로 돌아오는지는 이번 사이클의 코드로는 확인되지 않는다.
+
+클라이언트(`AgentRegistrar.ensureIdentity`, §6)는 갱신이 거절됐을 때 사유에 따라 갈린다.
+`REATTESTATION_REQUIRED`나 `AGENT_NOT_FOUND`처럼 "새 키로 재등록해도 안전한" 사유만 새
+키를 만들어 재등록하고, 그 밖의 사유(`DPOP_INVALID`, `AGENT_INACTIVE` 등)는 재등록을 시도하지
+않고 그대로 실패로 보고한다 — 가짜·재생된 proof나 비활성화된 신원까지 재등록의 신호로
+받아들이면 안 되기 때문이다.
 
 클라이언트는 재시도가 무의미한 사유에 대해 **반복 시도하지 않는다.** 시스템 메시지로 사유를
 보여주고 멈춘다.
@@ -748,8 +872,9 @@ agent-registration:
 8. **하드웨어/소프트웨어 강제 구분** — `attestationApplicationId`만 위조한 픽스처가
    `verified_boot=Verified` 정책에서 어떻게 다뤄지는지 명시적으로 테스트한다
 9. **`typ` 혼동** — 등록 PoP를 런타임 DPoP 자리에 제시하면 거절되는가, 그 반대도 거절되는가
-10. **재-attestation 상한** — `max-attestation-age` 초과 시 갱신이 거부되고 재등록 후 **같은
-    agentId**가 유지되는가
+10. **재-attestation 상한** — `max-attestation-age` 초과 시 갱신이 거부되고, 클라이언트가 새
+    키로 재등록해 **새 agentId**를 받는가 (기존 키를 재사용할 방법이 없으므로 신원은 유지되지
+    않는다 — §4.3)
 11. **식별자 규칙** — `urn:samsung:agent:<product>:<uuid>` 형식으로 조립되는가, 네임스페이스
    안에서 유일한가. 그리고 **인가 비교가 전체 문자열 일치인가** — 접두어로 비교하면
    `...:agent:x`가 `...:agent:xyz`를 통과시키는 우회가 생긴다. 이 음성 테스트를 넣는다
@@ -791,7 +916,9 @@ agent-registration:
 1. `server/`가 빌드되고 단위 테스트가 통과한다
 2. 앱을 처음 실행하면 **대화 없이** 등록이 일어나고, 화면에 발급된 `urn:samsung:agent:...` 신원이 보인다
 3. 그 자격증명으로 `GET /agent/whoami`가 DPoP 검증을 통과하고 같은 agentId를 돌려준다
-4. 앱을 재시작해도 **같은 agentId**가 유지된다. 재등록해도 신원은 바뀌지 않는다
+4. 앱을 재시작해도 **같은 agentId**가 유지된다 (키를 재사용하고 자격증명만 갱신하므로 —
+   §4.3, §6). 단, `max-attestation-age`를 넘겨 재등록하면 새 키가 되어 **새 agentId**로
+   넘어간다(#12) — "재등록해도 신원이 유지된다"는 뜻이 아니다
 5. `POST /agent/credential`이 attestation 없이 새 자격증명을 발급한다
 6. 정책을 `require-security-level: STRONGBOX`로 올리면 A36의 등록이
    `POLICY_SECURITY_LEVEL`로 거절된다
@@ -800,7 +927,9 @@ agent-registration:
 9. DPoP proof 재생 공격이 거절된다
 10. **CRL에 등재된 인증서를 포함한 체인이 거절된다**
 11. **등록 PoP와 런타임 DPoP가 서로의 자리에서 거절된다** (`typ` 분리)
-12. **`max-attestation-age` 초과 시 갱신이 거부되고, 재등록 후 같은 agentId가 유지된다**
+12. **`max-attestation-age` 초과 시 갱신이 거부되고(`REATTESTATION_REQUIRED`), 클라이언트가
+    새 키로 재등록해 새 agentId를 받는다** — 기존 키를 재사용할 방법이 없으므로(§4.3), 신원이
+    유지되는 것이 아니라 새 신원으로 넘어가는 것이 맞는 동작이다
 
 ## 12. 리스크
 
