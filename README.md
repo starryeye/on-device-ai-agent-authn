@@ -19,9 +19,15 @@
 
 1. **① 에이전트 신원** — 에이전트가 하드웨어(Android Keystore)에 묶인 자기 신원을 갖는다.
    `server/`가 Key Attestation 체인을 검증해 그 신원을 발급하고, `android/`의 클라이언트가
-   키를 만들어 등록하고 재시작 간에 재사용한다. **완료** — 자동화 테스트는 서버 56개,
-   안드로이드 12개가 모두 통과한다. 다만 실기기에서의 종단 간 검증(등록 → 재시작 →
-   자격증명 갱신)은 아직 기기 연결 후 확인이 필요한 상태(pending)다. 설계:
+   키를 만들어 등록하고 재시작 간에 재사용한다. **완료, 실기기 검증됨** — 자동화
+   테스트는 서버 68개, 안드로이드 16개가 모두 통과하고, 2026-08-30에 Galaxy A36
+   실기기로 종단 간 흐름(최초 등록 → 재시작 후 신원 유지 → 채팅 동작 →
+   STRONGBOX/기기 증명 정책 거절 → 정책 복원 후 재등록)을 직접 관찰했다. 재시작 후
+   같은 `agentId`가 재사용되는 것, 정책 위반 시 `POLICY_SECURITY_LEVEL`·
+   `POLICY_DEVICE_BINDING`으로 거절되는 것을 실기기에서 확인했다. 세부 관찰 결과와
+   재현 절차는 [server/README.md](server/README.md)의 "실기기 검증" 절에 있다.
+   남은 인증 사이클(②·③)이 끝나야 최종적으로 이 프로젝트가 완결된다는 점에서
+   "완료"는 사이클 ①에 한정된다. 설계:
    [docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md](docs/superpowers/specs/2026-08-27-agent-identity-registration-design.md),
    운영 문서: [server/README.md](server/README.md)
 2. **② 사용자 위임** — 에이전트가 "누구를 대신해" 행동하는지(`act` 클레임, OBO 패턴)를 신원에

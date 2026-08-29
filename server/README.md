@@ -105,6 +105,50 @@ agent-registration:
 
 ## 상태
 
-서버 쪽 자동화 테스트(68개)는 통과한다. 실기기를 통한 종단 간 검증(안드로이드 클라이언트 →
-이 서버)은 아직 **기기 연결 후 확인이 필요한 상태(pending)**다 — 이 문서의 curl 예시와
-`./gradlew test`로 확인되는 범위를 넘는 주장은 하지 않는다.
+서버 쪽 자동화 테스트(68개)는 통과한다.
+
+### 실기기 검증 (2026-08-30, Galaxy A36 / SM-A366N, Android SDK 36)
+
+안드로이드 클라이언트 → 이 서버로 실제 종단 간 흐름을 관찰했다. 서버는 로컬 맥에서
+`./gradlew bootRun`으로 띄우고 `adb reverse tcp:8080 tcp:8080`으로 연결했다.
+
+- **최초 등록** — 앱을 새로 설치해 처음 실행하니 `새 에이전트 신원 등록:
+  urn:samsung:agent:galaxy-personal-agent:5897c572-ede4-42be-a28a-fbc10c77e8c5` 줄이
+  화면에 나타났고, 이어서 `서버가 확인한 신원: urn:samsung:agent:galaxy-personal-agent:
+  5897c572-ede4-42be-a28a-fbc10c77e8c5`(동일한 값), `자격증명 갱신 성공
+  (attestation 없이)`가 순서대로 표시됐다. 이 UUID 형식(`urn:samsung:agent:
+  galaxy-personal-agent:<uuid>`)이 실기기에서 실제로 발급된 `agentId`다.
+- **재시작 후 신원 유지** — 앱을 강제 종료하고 다시 켜니 `기존 에이전트 신원 재사용:
+  urn:samsung:agent:galaxy-personal-agent:5897c572-ede4-42be-a28a-fbc10c77e8c5`로,
+  최초 등록 때와 **완전히 같은 agentId**가 재사용됐다. `서버가 확인한 신원`도 동일했다.
+- **채팅 동작** — "battery percent" 메시지를 보내니 `get_battery_level` 툴을 호출해
+  "The battery level is 87%."로 정확히 응답했다. 신원 등록이 대화를 막지 않는다.
+- **정책 거절 — 보안 등급** — `require-security-level: STRONGBOX`로 바꾸고 서버
+  DB(`server/data/`)를 지워 재등록을 강제하니, 화면에 `신원 등록 실패:
+  POLICY_SECURITY_LEVEL`이 표시됐다. Galaxy A36은 TEE 전용(StrongBox 없음)이라
+  예상대로 거절된 것이다.
+- **정책 거절 — 기기 증명** — `require-security-level: TRUSTED_ENVIRONMENT`로
+  되돌리고 `require-device-binding: true`로 바꿔 같은 방식으로 재등록을 강제하니,
+  `신원 등록 실패: POLICY_DEVICE_BINDING`이 표시됐다. 소매 기기라 기기 증명을 만들
+  수 없어 예상대로 거절된 것이다.
+- **정책 복원 후 재등록 성공** — 두 값을 원래대로(`TRUSTED_ENVIRONMENT`,
+  `require-device-binding: false`) 되돌리고 DB를 다시 지운 뒤 재실행하니 등록에
+  성공했다. 단, 이때 표시된 줄은 `서버가 모르는 키를 복구 재등록(새 신원):
+  urn:samsung:agent:galaxy-personal-agent:0a212cb5-079e-4de8-880b-b70ebb42e75a`였고
+  **agentId가 최초 등록 때와 달라졌다**. 이는 버그가 아니라 설계대로다 —
+  `AgentRegistrar.registerWithNewKey`는 정책 거절 여부와 무관하게 매 재등록 시도마다
+  로컬 Keystore 키를 새로 만들어 이전 키를 덮어쓴다. STRONGBOX·기기 증명 정책
+  실험에서 거절당한 두 번의 시도가 이미 원래 키(5897c572...)를 두 차례 새 키로
+  교체했으므로, 정책을 복원한 뒤의 성공은 `AGENT_NOT_FOUND` 복구 경로(새 키·새 신원)를
+  탄 것이지 원래 신원(5897c572...)의 재등록이 아니다. 정책 실험을 하지 않고 단순히
+  서버 DB만 지운 경우라면 같은 경로를 타되 원래 키가 살아있어 다른 결과가 나올 수
+  있다 — 이 세션에서는 그 조합을 별도로 관찰하지 않았다.
+- 이 세션에서 실행한 서버(`./gradlew bootRun`)의 콘솔에는 정책 거절 사유가 별도
+  로그로 남지 않았고, 안드로이드 클라이언트도 HTTP 요청/응답을 logcat에 남기지
+  않는다 — 위 결과는 전부 앱 화면을 스크린샷으로 캡처해 읽은 것이다.
+- 부수적으로, 서버가 뜰 때마다 `HHH000305: Could not create proxy factory for:
+  ...AgentIdentity`(Hibernate lazy-loading proxy 생성 실패) WARN 로그가 한 번씩
+  찍혔다. Kotlin 엔티티 클래스의 getter가 기본적으로 `final`이라 Hibernate가 프록시를
+  만들지 못해 나는 경고로 보이며, 기동과 요청 처리에는 영향이 없었다(등록·갱신·조회가
+  모두 정상 동작했다). 원인이 궁금하면 `AgentIdentity` 엔티티에 `open`을 붙이거나
+  Hibernate bytecode enhancement 플러그인을 검토해볼 만하다.
