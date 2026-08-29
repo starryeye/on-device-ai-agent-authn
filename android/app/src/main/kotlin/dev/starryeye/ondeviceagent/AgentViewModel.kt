@@ -63,6 +63,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
   var uiState: AgentUiState by mutableStateOf(AgentUiState.Loading)
     private set
 
+  /**
+   * 에이전트 신원 확립의 현재 상태. 채팅 흐름과 독립적이다 — [uiState]는 이 값을 기다리지
+   * 않고, 이 값도 [uiState]를 막지 않는다.
+   */
+  var identityState: AgentIdentityState by mutableStateOf(AgentIdentityState.Registering)
+    private set
+
   /** turn이 도는 동안 입력을 잠근다. 엔진은 한 번에 하나의 대화만 다룬다. */
   private var busy by mutableStateOf(false)
 
@@ -97,9 +104,14 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
           keys = keyStore,
           proofs = JwsProofSigner(keyStore),
         )
-      when (val state = registrar.register()) {
+      val state = registrar.ensureIdentity()
+      identityState = state
+      when (state) {
         is AgentIdentityState.Registered -> {
-          addSystem("에이전트 신원: ${state.agentId}")
+          addSystem(
+            if (state.reused) "기존 에이전트 신원 재사용: ${state.agentId}"
+            else "새 에이전트 신원 등록: ${state.agentId}"
+          )
           // 발급만으로는 자격증명이 통하는지 모른다. 한 번씩 실제로 써 본다.
           runCatching { registrar.whoami() }
             .onSuccess { addSystem("서버가 확인한 신원: $it") }

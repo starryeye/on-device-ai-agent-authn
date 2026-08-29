@@ -9,9 +9,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 등록 흐름. challenge → 키 생성 → 체인 제출 → 신원 수령.
+ * 신원 확립 흐름.
  *
- * 사용자와 무관하게 앱 최초 실행 시 자동으로 일어난다. 대화도 모델도 관여하지 않는다.
+ * 앱 최초 실행 시 대화와 무관하게 자동으로 일어난다. **키가 없으면 등록하고, 있으면
+ * 자격증명만 갱신한다** — 그래야 재시작해도 같은 신원이 유지된다. 기존 키를 새 challenge 로
+ * 다시 attest 할 방법은 없다([AgentKeyStore.createKey] 참고). 그래서 재등록은 늘 새 키·새
+ * 신원을 뜻하고, 서버가 `REATTESTATION_REQUIRED` 로 갱신을 거절할 때만 그 값을 치른다.
  */
 class AgentRegistrar(
   private val baseUrl: String,
@@ -21,32 +24,58 @@ class AgentRegistrar(
   private val integrity: IntegrityTokenProvider = NoIntegrityToken,
 ) {
 
-  suspend fun register(): AgentIdentityState = withContext(Dispatchers.IO) {
+  /**
+   * 신원을 확립한다. challenge → 키 생성 → 체인 제출 → 신원 수령(최초 실행), 또는
+   * DPoP 로 자격증명만 갱신(재실행).
+   *
+   * - 키가 없다 → 새로 등록한다.
+   * - 키가 있다 → attestation 을 다시 하지 않고 자격증명만 갱신한다.
+   * - 갱신이 `REATTESTATION_REQUIRED` 로 거절된다 → attestation 이 너무 오래돼 더 이상
+   *   연장할 수 없다는 서버의 판단이다. 이때만 새 키로 다시 등록한다(새 신원이 된다).
+   *   그 외의 거절 사유는 그대로 실패로 보고한다 — 원인 모를 갱신 실패를 새 등록으로
+   *   덮으면 진짜 문제(예: 서버가 이 키를 모른다)를 숨기게 된다.
+   */
+  suspend fun ensureIdentity(): AgentIdentityState = withContext(Dispatchers.IO) {
     try {
-      val challengeResponse = JSONObject(send("POST", "$baseUrl/agent/registration/challenge", null))
-      val registrationId = challengeResponse.getString("registrationId")
-      val challenge = challengeResponse.getString("challenge")
-
-      val chain = keys.createKey(Base64.getUrlDecoder().decode(challenge))
-
-      val body =
-        JSONObject()
-          .put("registrationId", registrationId)
-          .put(
-            "attestationChain",
-            JSONArray(chain.map { Base64.getEncoder().encodeToString(it.encoded) }),
-          )
-          .put("pop", proofs.registrationPop("$baseUrl/agent/registration", challenge))
-          .put("deviceBinding", deviceBinding.deviceBinding())
-          .put("playIntegrityToken", integrity.integrityToken())
-
-      val response = JSONObject(send("POST", "$baseUrl/agent/registration", body.toString()))
-      AgentIdentityState.Registered(response.getString("agentId"))
+      if (keys.hasKey()) {
+        try {
+          val refreshed = doRefreshCredential()
+          return@withContext AgentIdentityState.Registered(refreshed.agentId, reused = true)
+        } catch (e: RegistrationRejected) {
+          if (e.reason != "REATTESTATION_REQUIRED") {
+            return@withContext AgentIdentityState.Failed(e.reason)
+          }
+          // 재-attest 는 불가능하다 — 아래로 흘러 새 키로 다시 등록한다.
+        }
+      }
+      registerWithNewKey()
     } catch (e: RegistrationRejected) {
       AgentIdentityState.Failed(e.reason)
     } catch (e: Exception) {
       AgentIdentityState.Failed(e.message ?: e::class.simpleName ?: "unknown")
     }
+  }
+
+  private suspend fun registerWithNewKey(): AgentIdentityState {
+    val challengeResponse = JSONObject(send("POST", "$baseUrl/agent/registration/challenge", null))
+    val registrationId = challengeResponse.getString("registrationId")
+    val challenge = challengeResponse.getString("challenge")
+
+    val chain = keys.createKey(Base64.getUrlDecoder().decode(challenge))
+
+    val body =
+      JSONObject()
+        .put("registrationId", registrationId)
+        .put(
+          "attestationChain",
+          JSONArray(chain.map { Base64.getEncoder().encodeToString(it.encoded) }),
+        )
+        .put("pop", proofs.registrationPop("$baseUrl/agent/registration", challenge))
+        .put("deviceBinding", deviceBinding.deviceBinding())
+        .put("playIntegrityToken", integrity.integrityToken())
+
+    val response = JSONObject(send("POST", "$baseUrl/agent/registration", body.toString()))
+    return AgentIdentityState.Registered(response.getString("agentId"), reused = false)
   }
 
   /** 발급받은 자격증명이 실제로 통하는지 확인한다. 완료 기준 3. */
@@ -56,10 +85,16 @@ class AgentRegistrar(
   }
 
   /** attestation 없이 자격증명을 새로 받는다. 완료 기준 5. */
-  suspend fun refreshCredential(): String = withContext(Dispatchers.IO) {
+  suspend fun refreshCredential(): CredentialRefresh = withContext(Dispatchers.IO) { doRefreshCredential() }
+
+  private fun doRefreshCredential(): CredentialRefresh {
     val url = "$baseUrl/agent/credential"
-    JSONObject(send("POST", url, "", proofs.dpop("POST", url))).getString("credential")
+    val response = JSONObject(send("POST", url, "", proofs.dpop("POST", url)))
+    return CredentialRefresh(response.getString("agentId"), response.getString("credential"))
   }
+
+  /** [refreshCredential] 의 결과. */
+  data class CredentialRefresh(val agentId: String, val credential: String)
 
   private class RegistrationRejected(val reason: String) : Exception(reason)
 

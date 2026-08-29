@@ -22,18 +22,22 @@ class AgentKeyStore(private val alias: String = "agent-identity-key") {
 
   fun hasKey(): Boolean = keyStore.containsAlias(alias)
 
-  /** [challenge] 를 attestation challenge 로 넣어 키를 만들고 체인을 돌려준다. */
+  /**
+   * [challenge] 를 attestation challenge 로 넣어 키를 만들고 체인을 돌려준다.
+   *
+   * 기존 키가 있으면 지운다 — 재등록은 항상 새 키를 뜻한다. `setAttestationChallenge` 는
+   * 키 생성 시점에만 걸 수 있어(`KeyGenParameterSpec` 에만 존재), 이미 있는 키를 새
+   * challenge 로 다시 attest 할 방법이 없다. 그래서 재등록은 필연적으로 새 신원이 된다.
+   */
   fun createKey(challenge: ByteArray): List<X509Certificate> {
     if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
-    for (strongBox in listOf(true, false)) {
-      try {
-        generate(challenge, strongBox)
-        return chain()
-      } catch (e: StrongBoxUnavailableException) {
-        if (!strongBox) throw e
-      }
+    return try {
+      generate(challenge, strongBox = true)
+      chain()
+    } catch (e: StrongBoxUnavailableException) {
+      generate(challenge, strongBox = false)
+      chain()
     }
-    error("키를 만들지 못했다")
   }
 
   fun chain(): List<X509Certificate> =
