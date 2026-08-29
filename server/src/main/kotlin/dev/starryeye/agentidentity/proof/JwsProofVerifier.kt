@@ -67,4 +67,18 @@ class JwsProofVerifier(
     val cutoff = now.minus(skew.multipliedBy(2))
     seenJti.entries.removeIf { it.value.isBefore(cutoff) }
   }
+
+  /**
+   * 이미 [verify] 를 통과한 것과 같은 JWS 문자열에서 커스텀 클레임을 읽는다.
+   *
+   * 서명을 다시 확인하지 않는다 — 호출자가 같은 `jws` 로 [verify] 를 먼저 통과시켰다는
+   * 전제 위에서만 안전하다. 검증되지 않은 JWS 에서 클레임을 읽어 신뢰하면 서명 없이도
+   * 클레임을 조작할 수 있게 된다.
+   */
+  fun claim(jws: String, name: String): String? =
+      try {
+        SignedJWT.parse(jws).getJWTClaimsSet().getStringClaim(name)
+      } catch (e: Exception) {
+        null
+      }
 }

@@ -3,6 +3,7 @@ package dev.starryeye.agentidentity.api
 import dev.starryeye.agentidentity.identity.CredentialIssuer
 import dev.starryeye.agentidentity.registration.ChallengeStore
 import dev.starryeye.agentidentity.registration.RegistrationService
+import jakarta.servlet.http.HttpServletRequest
 import java.io.ByteArrayInputStream
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -39,11 +40,16 @@ class RegistrationController(
   }
 
   @PostMapping
-  fun register(@RequestBody request: RegistrationRequest): ResponseEntity<Map<String, Any>> {
+  fun register(
+      @RequestBody request: RegistrationRequest,
+      httpRequest: HttpServletRequest,
+  ): ResponseEntity<Map<String, Any>> {
     val outcome =
         registration.register(
             request.registrationId,
             parseChain(request.attestationChain),
+            request.pop,
+            httpRequest.requestURL.toString(),
             request.deviceBinding,
             request.playIntegrityToken)
 

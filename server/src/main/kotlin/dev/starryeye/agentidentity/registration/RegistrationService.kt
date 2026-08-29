@@ -10,6 +10,8 @@ import dev.starryeye.agentidentity.identity.AgentIdentityRepository
 import dev.starryeye.agentidentity.policy.PolicyProperties
 import dev.starryeye.agentidentity.policy.RegistrationPolicy
 import dev.starryeye.agentidentity.policy.RejectionReason
+import dev.starryeye.agentidentity.proof.JwsProofVerifier
+import dev.starryeye.agentidentity.proof.ProofType
 import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 import java.time.Clock
@@ -23,6 +25,7 @@ class RegistrationService(
     private val challenges: ChallengeStore,
     private val verifier: AttestationVerifier,
     private val policy: RegistrationPolicy,
+    private val proofs: JwsProofVerifier,
     private val repository: AgentIdentityRepository,
     private val properties: PolicyProperties,
     private val clock: Clock,
@@ -43,6 +46,8 @@ class RegistrationService(
   fun register(
       registrationId: String,
       chain: List<X509Certificate>,
+      pop: String?,
+      url: String,
       deviceBinding: String?,
       integrityToken: String?,
   ): Outcome {
@@ -65,12 +70,19 @@ class RegistrationService(
           }
         }
 
+    val thumbprint = thumbprintOf(verified)
+
+    // 체인은 "TEE 가 이 키를 이 challenge 와 함께 만들었다"만 증명한다. 그 개인키를 지금
+    // 이 순간 쥐고 있다는 것은 별개의 사실이며, 그것을 증명하는 것이 PoP 다. attested 키가
+    // 있어야 서명자를 비교할 수 있으므로 체인 검증보다 먼저 올 수 없다.
+    if (!proofOfPossessionValid(pop, thumbprint, challenge, url)) {
+      return Outcome.rejected(RejectionReason.POP_INVALID)
+    }
+
     val rejected = policy.evaluate(verified, deviceBinding, integrityToken)
     if (rejected != null) {
       return Outcome.rejected(rejected)
     }
-
-    val thumbprint = thumbprintOf(verified)
 
     // 멱등: 같은 키면 같은 신원. 새 신원은 키가 바뀔 때만 생긴다.
     val existing = repository.findByJwkThumbprint(thumbprint)
@@ -109,6 +121,34 @@ class RegistrationService(
       winner.markAttested(clock.instant())
       Outcome.accepted(repository.save(winner))
     }
+  }
+
+  /**
+   * 등록 PoP 가 지금 등록 중인 attested 키로 서명됐고, 이 등록 거래의 challenge 를
+   * 가리키는지 확인한다.
+   *
+   * 세 가지가 모두 맞아야 통과한다: (1) `JwsProofVerifier` 가 `typ`·서명·`htm`/`htu`·`iat`
+   * 오차·`jti` 재생을 확인하고, (2) 서명자의 지문이 방금 [thumbprintOf] 로 뽑은 attested
+   * 키의 지문과 같아야 하고 — 다르면 체인은 훔쳤지만 다른 키로 서명한 경우다 — (3) proof
+   * 안의 `challenge` 클레임이 이 거래에서 소비한 challenge 와 같아야 한다. (3)이 없으면
+   * 한 등록 거래용으로 만든 유효한 proof 를 challenge 만 다른 별개의 거래에 들이밀 수
+   * 있다 — `jti` 재생 방지는 "같은 토큰 재사용"만 막지 "다른 거래에 들이밀기"는 막지 않는다.
+   */
+  private fun proofOfPossessionValid(
+      pop: String?,
+      attestedThumbprint: String,
+      challenge: ByteArray,
+      url: String,
+  ): Boolean {
+    if (pop == null) {
+      return false
+    }
+    val signerThumbprint = proofs.verify(pop, ProofType.REGISTRATION, "POST", url) ?: return false
+    if (signerThumbprint != attestedThumbprint) {
+      return false
+    }
+    val claimedChallenge = proofs.claim(pop, "challenge") ?: return false
+    return claimedChallenge == ChallengeStore.encode(challenge)
   }
 
   companion object {
