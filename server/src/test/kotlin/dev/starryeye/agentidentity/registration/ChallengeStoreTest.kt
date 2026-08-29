@@ -7,6 +7,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 
 /**
@@ -72,5 +73,29 @@ class ChallengeStoreTest {
     // 청소가 없으면 6 (쌓인 5 + 새로 발급된 1) 이 된다. 청소가 있으면 만료된 5 개가
     // 걷혀나가고 방금 발급한 1 개만 남는다.
     assertThat(store.issuedCount()).isEqualTo(1)
+  }
+
+  @Test
+  fun `대기중인_challenge_가_상한에_닿으면_새_challenge_발급을_거절한다`() {
+    val properties =
+        PolicyProperties().apply {
+          challengeTtl = Duration.ofMinutes(5)
+          maxPendingChallenges = 3
+        }
+    val clock = MutableClock(Instant.parse("2026-08-28T00:00:00Z"))
+    val store = ChallengeStore(properties, clock)
+
+    // 아무도 소비하지 않는 채로 상한(3)까지 채운다 — TTL 이 아직 지나지 않았으므로
+    // 시간 청소로는 걷히지 않는다.
+    repeat(3) { store.issue() }
+    assertThat(store.issuedCount()).isEqualTo(3)
+
+    // 상한에 닿은 뒤의 발급은, 살아있는 challenge 를 밀어내 자리를 만드는 대신
+    // 예외로 거절돼야 한다.
+    assertThatThrownBy { store.issue() }
+        .isInstanceOf(ChallengeStore.CapacityExceededException::class.java)
+
+    // 거절이 실제로 맵 크기를 지켰는지 — 밀어냈다면 여전히 3, 몰래 늘었다면 4일 것이다.
+    assertThat(store.issuedCount()).isEqualTo(3)
   }
 }

@@ -51,4 +51,7 @@ class CredentialIssuer(
       throw IllegalStateException("자격증명을 발급하지 못했다", e)
     }
   }
+
+  /** 테스트가 발급된 서명을 검증할 수 있게 공개키만 노출한다. 개인키는 여전히 감춰진다. */
+  internal fun signingPublicJwk(): ECKey = signingKey.toPublicJWK()
 }

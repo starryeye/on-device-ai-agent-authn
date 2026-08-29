@@ -24,6 +24,16 @@ class ChallengeStore(
   /** 등록 거래 하나. registrationId 는 거래 식별자이지 신원이 아니다. */
   data class Challenge(val registrationId: String, val value: ByteArray, val expiresAt: Instant)
 
+  /**
+   * 대기 중인 challenge 가 [PolicyProperties.maxPendingChallenges] 에 닿았을 때 던진다.
+   *
+   * TTL 이 지나야 걷히는 시간 청소만으로는 TTL 안에서 몰아치는 홍수를 막지 못한다. 이때
+   * 상한에 닿으면 이미 살아있는(아직 유효한) challenge 를 밀어내 자리를 만드는 대신 새
+   * 발급 자체를 거절한다 — 살아있는 challenge 를 밀어내면 그것으로 막 등록을 마치려던
+   * 정상 사용자를 튕겨내게 된다.
+   */
+  class CapacityExceededException : RuntimeException()
+
   private val issued = ConcurrentHashMap<String, Challenge>()
   private val random = SecureRandom()
 
@@ -33,6 +43,10 @@ class ChallengeStore(
     // 이 엔드포인트는 인증 없이 누구나 호출할 수 있어, 청소가 없으면 반복 호출만으로 맵이
     // 무한히 자란다.
     issued.entries.removeIf { it.value.expiresAt.isBefore(now) }
+
+    if (issued.size >= properties.maxPendingChallenges) {
+      throw CapacityExceededException()
+    }
 
     val value = ByteArray(32)
     random.nextBytes(value)

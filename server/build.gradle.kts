@@ -48,6 +48,13 @@ dependencies {
   runtimeOnly("org.jetbrains.kotlin:kotlin-reflect:2.2.0")
 
   testImplementation("org.springframework.boot:spring-boot-starter-test")
+  // 스프링 부트 4 는 `@WebMvcTest` 를 웹 스타터와 무관하게 유지하기 위해
+  // spring-boot-test-autoconfigure 에서 웹 MVC 슬라이스를 별도 모듈로 뺐다.
+  // spring-boot-starter-test 가 이걸 전이하지 않으므로 직접 추가한다. 버전은 명시하지
+  // 않는다 — io.spring.dependency-management 가 이미 적용하는 스프링 부트 BOM(4.1.1,
+  // org.springframework.boot 플러그인 버전과 동일)이 관리하므로, 이 프로젝트가 이미
+  // 쓰는 스프링 부트 버전 그대로 맞춰진다.
+  testImplementation("org.springframework.boot:spring-boot-webmvc-test")
   // AttestationVerifierTest 가 "신뢰 앵커와 무관한 자기서명 인증서"를 직접 만들어 실제
   // 경로 검증 실패(PathValidationFailure)를 재현하는 데 쓴다. JDK 는 인증서 생성 공개
   // API 가 없어서 필요하다. 서브모듈이 이미 쓰는 버전(1.78.1)에 맞춘다.
