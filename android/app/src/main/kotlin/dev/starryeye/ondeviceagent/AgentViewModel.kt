@@ -18,6 +18,10 @@ import com.google.adk.kt.types.Part
 import com.google.adk.kt.types.Role
 import dev.starryeye.ondeviceagent.agent.AndroidBatteryReader
 import dev.starryeye.ondeviceagent.agent.OnDeviceAgent
+import dev.starryeye.ondeviceagent.identity.AgentIdentityState
+import dev.starryeye.ondeviceagent.identity.AgentKeyStore
+import dev.starryeye.ondeviceagent.identity.AgentRegistrar
+import dev.starryeye.ondeviceagent.identity.JwsProofSigner
 import dev.starryeye.ondeviceagent.model.ModelStore
 import dev.starryeye.ondeviceagent.ui.ChatAuthor
 import dev.starryeye.ondeviceagent.ui.ChatMessage
@@ -80,6 +84,32 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         uiState = AgentUiState.NeedsModel
       } else {
         loadModel(modelFile)
+      }
+    }
+
+    // 모델 로드와 나란히, 대화와 무관하게 시작한다. 등록 실패가 채팅을 막지 않는다 —
+    // 이번 사이클에는 자격증명을 쓰는 툴이 없기 때문이다.
+    viewModelScope.launch {
+      val keyStore = AgentKeyStore()
+      val registrar =
+        AgentRegistrar(
+          baseUrl = "http://127.0.0.1:8080",
+          keys = keyStore,
+          proofs = JwsProofSigner(keyStore),
+        )
+      when (val state = registrar.register()) {
+        is AgentIdentityState.Registered -> {
+          addSystem("에이전트 신원: ${state.agentId}")
+          // 발급만으로는 자격증명이 통하는지 모른다. 한 번씩 실제로 써 본다.
+          runCatching { registrar.whoami() }
+            .onSuccess { addSystem("서버가 확인한 신원: $it") }
+            .onFailure { addSystem("신원 확인 실패: ${it.message}") }
+          runCatching { registrar.refreshCredential() }
+            .onSuccess { addSystem("자격증명 갱신 성공 (attestation 없이)") }
+            .onFailure { addSystem("자격증명 갱신 실패: ${it.message}") }
+        }
+        is AgentIdentityState.Failed -> addSystem("신원 등록 실패: ${state.reason}")
+        AgentIdentityState.Registering -> Unit
       }
     }
   }

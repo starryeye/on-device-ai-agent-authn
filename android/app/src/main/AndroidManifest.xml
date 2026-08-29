@@ -4,10 +4,12 @@
     <!-- 모델 파일을 최초 1회 내려받을 때만 쓴다. 이후 앱은 완전히 오프라인으로 동작한다. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 개발용: adb reverse로 맥 위 127.0.0.1 서버에 평문 HTTP로 신원 등록한다. -->
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:theme="@style/Theme.OnDeviceAgent">
+        android:theme="@style/Theme.OnDeviceAgent"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
