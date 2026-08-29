@@ -46,12 +46,13 @@ class CredentialControllerTest {
     private val NOW: Instant = Instant.parse("2026-08-28T12:00:00Z")
 
     // AgentIdentity 는 생성자에서 항상 status="ACTIVE" 로 시작하고, 그 뒤로 바꿀 뮤테이터가
-    // 없다 — 그래서 `authenticate` 의 `status == "ACTIVE"` 필터가 실제로 걸러내는 경우를
-    // 이 테스트로는 재현할 수 없다. 이것은 이번 라운드에서 고치지 않기로 한(리뷰에서
-    // "later triage" 로 분류된) 별개의 결함이다. 프로덕션 코드에 뮤테이터를 새로 추가해
-    // 이 브랜치만을 위한 시험 통로를 만들지 않는다 — 그건 이번 라운드의 범위를 넘는
-    // 프로덕션 변경이다. 그래서 이 테스트 파일은 ACTIVE 필터의 반대쪽(비활성 신원)은
-    // 다루지 않고, DPoP 검증·지문 조회·max-attestation-age 갈래만 다룬다.
+    // 없다 — 그래서 `authenticate` 가 돌려주는 `AuthenticationOutcome.AgentInactive`(→
+    // AGENT_INACTIVE) 갈래를 이 테스트로는 재현할 수 없다. 이것은 이전 라운드에서 고치지
+    // 않기로 한(리뷰에서 "later triage" 로 분류된) 별개의 결함이고, 이번 라운드(등록되지
+    // 않은 키 구분)에서도 범위 밖이다. 프로덕션 코드에 뮤테이터를 새로 추가해 이 갈래만을
+    // 위한 시험 통로를 만들지 않는다 — 그건 범위를 넘는 프로덕션 변경이다. 그래서 이 테스트
+    // 파일은 ACTIVE 필터의 반대쪽(비활성 신원)은 다루지 않고, DPoP 검증·지문 조회(등록됨/
+    // 등록 안 됨)·max-attestation-age 갈래만 다룬다.
     private fun identity(lastAttestedAt: Instant): AgentIdentity =
         AgentIdentity(
             "agent-1",
@@ -148,5 +149,31 @@ class CredentialControllerTest {
         .perform(post("/agent/credential").header("DPoP", "garbage"))
         .andExpect(status().isUnauthorized)
         .andExpect(jsonPath("$.reason").value("DPOP_INVALID"))
+  }
+
+  @Test
+  fun `whoami_에_등록되지_않은_키의_유효한_DPoP_이면_401_AGENT_NOT_FOUND_를_돌려준다`() {
+    // proof 서명 자체는 진짜다 — 다만 그 지문으로 등록된 신원이 없다. DPOP_INVALID 로
+    // 뭉뚱그리면 클라이언트가 "재등록해도 되는 실패"인지 구분할 수 없다.
+    Mockito.`when`(proofs.verify(eqKt("valid-proof"), eqKt(ProofType.DPOP), anyString(), anyString()))
+        .thenReturn("thumb-never-registered")
+    Mockito.`when`(repository.findByJwkThumbprint("thumb-never-registered")).thenReturn(null)
+
+    mockMvc
+        .perform(get("/agent/whoami").header("DPoP", "valid-proof"))
+        .andExpect(status().isUnauthorized)
+        .andExpect(jsonPath("$.reason").value("AGENT_NOT_FOUND"))
+  }
+
+  @Test
+  fun `refresh_에_등록되지_않은_키의_유효한_DPoP_이면_401_AGENT_NOT_FOUND_를_돌려준다`() {
+    Mockito.`when`(proofs.verify(eqKt("valid-proof"), eqKt(ProofType.DPOP), anyString(), anyString()))
+        .thenReturn("thumb-never-registered")
+    Mockito.`when`(repository.findByJwkThumbprint("thumb-never-registered")).thenReturn(null)
+
+    mockMvc
+        .perform(post("/agent/credential").header("DPoP", "valid-proof"))
+        .andExpect(status().isUnauthorized)
+        .andExpect(jsonPath("$.reason").value("AGENT_NOT_FOUND"))
   }
 }

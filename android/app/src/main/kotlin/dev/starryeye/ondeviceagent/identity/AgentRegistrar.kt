@@ -14,7 +14,8 @@ import org.json.JSONObject
  * 앱 최초 실행 시 대화와 무관하게 자동으로 일어난다. **키가 없으면 등록하고, 있으면
  * 자격증명만 갱신한다** — 그래야 재시작해도 같은 신원이 유지된다. 기존 키를 새 challenge 로
  * 다시 attest 할 방법은 없다([AgentKeyStore.createKey] 참고). 그래서 재등록은 늘 새 키·새
- * 신원을 뜻하고, 서버가 `REATTESTATION_REQUIRED` 로 갱신을 거절할 때만 그 값을 치른다.
+ * 신원을 뜻하고, 서버가 재등록을 허가하는 사유(아래 [ensureIdentity] 참고)로 갱신을 거절할
+ * 때만 그 값을 치른다.
  */
 class AgentRegistrar(
   private val baseUrl: String,
@@ -28,27 +29,30 @@ class AgentRegistrar(
    * 신원을 확립한다. challenge → 키 생성 → 체인 제출 → 신원 수령(최초 실행), 또는
    * DPoP 로 자격증명만 갱신(재실행).
    *
-   * - 키가 없다 → 새로 등록한다.
-   * - 키가 있다 → attestation 을 다시 하지 않고 자격증명만 갱신한다.
+   * - 키가 없다 → 새로 등록한다([RegistrationOrigin.FIRST_RUN]).
+   * - 키가 있다 → attestation 을 다시 하지 않고 자격증명만 갱신한다([RegistrationOrigin.REUSED]).
    * - 갱신이 `REATTESTATION_REQUIRED` 로 거절된다 → attestation 이 너무 오래돼 더 이상
-   *   연장할 수 없다는 서버의 판단이다. 이때만 새 키로 다시 등록한다(새 신원이 된다).
-   *   그 외의 거절 사유는 그대로 실패로 보고한다 — 원인 모를 갱신 실패를 새 등록으로
-   *   덮으면 진짜 문제(예: 서버가 이 키를 모른다)를 숨기게 된다.
+   *   연장할 수 없다는 서버의 판단이다. 새 키로 다시 등록한다(새 신원이 된다).
+   * - 갱신이 `AGENT_NOT_FOUND` 로 거절된다 → proof 자체는 유효한데(이 키를 지금 쥐고 있다는
+   *   것은 맞다) 서버에 이 키로 등록된 신원이 없다. 등록 도중(체인 제출 전후) 프로세스가
+   *   죽어 키만 만들어지고 서버에는 남지 않은 경우가 전형적이다. 새 키로 다시 등록해
+   *   복구한다.
+   * - 그 외의 거절 사유(`DPOP_INVALID`, `AGENT_INACTIVE` 등)는 그대로 실패로 보고한다 —
+   *   proof 가 위조·재생·만료됐거나 신원이 관리자에 의해 비활성화된 경우까지 재등록의
+   *   신호로 받아들이면, 가짜 proof 로 새 신원을 얻거나 비활성화를 그냥 우회하게 된다.
    */
   suspend fun ensureIdentity(): AgentIdentityState = withContext(Dispatchers.IO) {
     try {
       if (keys.hasKey()) {
         try {
           val refreshed = doRefreshCredential()
-          return@withContext AgentIdentityState.Registered(refreshed.agentId, reused = true)
+          return@withContext AgentIdentityState.Registered(refreshed.agentId, RegistrationOrigin.REUSED)
         } catch (e: RegistrationRejected) {
-          if (e.reason != "REATTESTATION_REQUIRED") {
-            return@withContext AgentIdentityState.Failed(e.reason)
-          }
-          // 재-attest 는 불가능하다 — 아래로 흘러 새 키로 다시 등록한다.
+          val origin = reregistrationOriginFor(e.reason) ?: return@withContext AgentIdentityState.Failed(e.reason)
+          return@withContext registerWithNewKey(origin)
         }
       }
-      registerWithNewKey()
+      registerWithNewKey(RegistrationOrigin.FIRST_RUN)
     } catch (e: RegistrationRejected) {
       AgentIdentityState.Failed(e.reason)
     } catch (e: Exception) {
@@ -56,7 +60,15 @@ class AgentRegistrar(
     }
   }
 
-  private suspend fun registerWithNewKey(): AgentIdentityState {
+  /** 갱신 거절 사유 중 "새 키로 다시 등록해도 안전하다"에 해당하는 것만 [RegistrationOrigin] 으로 옮긴다. */
+  private fun reregistrationOriginFor(reason: String): RegistrationOrigin? =
+    when (reason) {
+      "REATTESTATION_REQUIRED" -> RegistrationOrigin.REATTESTATION_REQUIRED
+      "AGENT_NOT_FOUND" -> RegistrationOrigin.AGENT_NOT_FOUND
+      else -> null
+    }
+
+  private suspend fun registerWithNewKey(origin: RegistrationOrigin): AgentIdentityState {
     val challengeResponse = JSONObject(send("POST", "$baseUrl/agent/registration/challenge", null))
     val registrationId = challengeResponse.getString("registrationId")
     val challenge = challengeResponse.getString("challenge")
@@ -75,7 +87,7 @@ class AgentRegistrar(
         .put("playIntegrityToken", integrity.integrityToken())
 
     val response = JSONObject(send("POST", "$baseUrl/agent/registration", body.toString()))
-    return AgentIdentityState.Registered(response.getString("agentId"), reused = false)
+    return AgentIdentityState.Registered(response.getString("agentId"), origin)
   }
 
   /** 발급받은 자격증명이 실제로 통하는지 확인한다. 완료 기준 3. */

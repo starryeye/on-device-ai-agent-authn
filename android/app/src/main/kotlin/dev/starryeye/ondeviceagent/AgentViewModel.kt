@@ -22,6 +22,7 @@ import dev.starryeye.ondeviceagent.identity.AgentIdentityState
 import dev.starryeye.ondeviceagent.identity.AgentKeyStore
 import dev.starryeye.ondeviceagent.identity.AgentRegistrar
 import dev.starryeye.ondeviceagent.identity.JwsProofSigner
+import dev.starryeye.ondeviceagent.identity.RegistrationOrigin
 import dev.starryeye.ondeviceagent.model.ModelStore
 import dev.starryeye.ondeviceagent.ui.ChatAuthor
 import dev.starryeye.ondeviceagent.ui.ChatMessage
@@ -108,23 +109,36 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
       identityState = state
       when (state) {
         is AgentIdentityState.Registered -> {
-          addSystem(
-            if (state.reused) "기존 에이전트 신원 재사용: ${state.agentId}"
-            else "새 에이전트 신원 등록: ${state.agentId}"
-          )
+          addSystem(identityOriginMessage(state))
           // 발급만으로는 자격증명이 통하는지 모른다. 한 번씩 실제로 써 본다.
           runCatching { registrar.whoami() }
             .onSuccess { addSystem("서버가 확인한 신원: $it") }
             .onFailure { addSystem("신원 확인 실패: ${it.message}") }
-          runCatching { registrar.refreshCredential() }
-            .onSuccess { addSystem("자격증명 갱신 성공 (attestation 없이)") }
-            .onFailure { addSystem("자격증명 갱신 실패: ${it.message}") }
+          // REUSED 는 ensureIdentity() 안에서 이미 자격증명 갱신을 한 번 거쳤다. 여기서 또
+          // 부르면 launch당 /agent/credential 을 두 번 치는 셈이라, 아직 그 경로를 타지
+          // 않은 나머지 origin(최초 등록·재등록)에서만 부른다.
+          if (state.origin != RegistrationOrigin.REUSED) {
+            runCatching { registrar.refreshCredential() }
+              .onSuccess { addSystem("자격증명 갱신 성공 (attestation 없이)") }
+              .onFailure { addSystem("자격증명 갱신 실패: ${it.message}") }
+          }
         }
         is AgentIdentityState.Failed -> addSystem("신원 등록 실패: ${state.reason}")
         AgentIdentityState.Registering -> Unit
       }
     }
   }
+
+  /** [AgentIdentityState.Registered] 가 어느 경로로 성립했는지 화면 시스템 줄로 옮긴다. */
+  private fun identityOriginMessage(state: AgentIdentityState.Registered): String =
+    when (state.origin) {
+      RegistrationOrigin.FIRST_RUN -> "새 에이전트 신원 등록: ${state.agentId}"
+      RegistrationOrigin.REUSED -> "기존 에이전트 신원 재사용: ${state.agentId}"
+      RegistrationOrigin.REATTESTATION_REQUIRED ->
+        "attestation 만료로 재등록(새 신원): ${state.agentId}"
+      RegistrationOrigin.AGENT_NOT_FOUND ->
+        "서버가 모르는 키를 복구 재등록(새 신원): ${state.agentId}"
+    }
 
   /** 가중치를 받고 이어서 로드한다. 이 앱이 네트워크를 쓰는 유일한 경로다. */
   fun downloadModel() {
