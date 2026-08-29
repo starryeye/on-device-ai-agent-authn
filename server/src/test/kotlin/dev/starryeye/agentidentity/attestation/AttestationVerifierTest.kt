@@ -1,7 +1,11 @@
 package dev.starryeye.agentidentity.attestation
 
+import com.android.keyattestation.verifier.AttestationApplicationId
+import com.android.keyattestation.verifier.AttestationPackageInfo
+import com.google.protobuf.ByteString
 import java.math.BigInteger
 import java.security.KeyPairGenerator
+import java.security.cert.CertPathValidatorException
 import java.security.cert.CertificateFactory
 import java.security.cert.TrustAnchor
 import java.security.cert.X509Certificate
@@ -98,7 +102,7 @@ class AttestationVerifierTest {
   }
 
   @Test
-  fun `유효기간이_지난_뒤에는_거절한다`() {
+  fun `유효기간이_지난_뒤에는_CHAIN_EXPIRED_사유로_거절한다`() {
     // RKP 중간 인증서는 2026-09-03 에 만료된다. 그 뒤 시각으로 보면 통과하면 안 된다.
     val result =
         verifierAt(Instant.parse("2026-10-01T00:00:00Z")) { emptySet() }
@@ -106,21 +110,63 @@ class AttestationVerifierTest {
 
     // 경로 검증(유효기간 포함)은 라이브러리 안에서 CertPathValidatorException 으로 잡혀
     // VerificationResult.PathValidationFailure 로 나온다 — 예외가 우리 쪽까지 튀지 않는다.
+    // 다만 detail(클래스 이름)만으로는 "만료"와 "폐기"와 "그 밖의 경로 검증 실패"를 구분할 수
+    // 없다 — certPathReason 이 그 구분을 담는 자리다. 이 값이 없으면 RegistrationService 는
+    // 셋을 모두 CHAIN_UNTRUSTED 로 뭉뚱그릴 수밖에 없다.
     assertThat(result).isInstanceOf(AttestationResult.Rejected::class.java)
-    assertThat((result as AttestationResult.Rejected).detail).isEqualTo("PathValidationFailure")
+    val rejected = result as AttestationResult.Rejected
+    assertThat(rejected.detail).isEqualTo("PathValidationFailure")
+    assertThat(rejected.certPathReason).isEqualTo(CertPathValidatorException.BasicReason.EXPIRED)
   }
 
   @Test
-  fun `체인의_인증서가_폐기목록에_있으면_거절한다`() {
+  fun `체인의_인증서가_폐기목록에_있으면_CHAIN_REVOKED_사유로_거절한다`() {
     val chain = fixtureChain()
     val revokedSerial = chain[1].serialNumber.toString(16)
 
     val result = verifierAt(VALID_AT) { setOf(revokedSerial) }.verify(chain, probeChallenge())
 
     // RevocationChecker 도 CertPathValidatorException(BasicReason.REVOKED) 을 던지고, 이 역시
-    // 경로 검증 단계에서 잡혀 PathValidationFailure 가 된다.
+    // 경로 검증 단계에서 잡혀 PathValidationFailure 가 된다 — certPathReason 이 없으면 위
+    // 만료 테스트와 구분할 수 없다.
     assertThat(result).isInstanceOf(AttestationResult.Rejected::class.java)
-    assertThat((result as AttestationResult.Rejected).detail).isEqualTo("PathValidationFailure")
+    val rejected = result as AttestationResult.Rejected
+    assertThat(rejected.detail).isEqualTo("PathValidationFailure")
+    assertThat(rejected.certPathReason).isEqualTo(CertPathValidatorException.BasicReason.REVOKED)
+  }
+
+  @Test
+  fun `신뢰_앵커_조회가_실패하면_인프라_장애로_거절한다`() {
+    // 체인/설정이 아니라 우리(또는 구글) 쪽 조회 실패다 — 공격이 아니므로 이 표시가 있어야
+    // RegistrationService 가 CHAIN_UNTRUSTED(재시도 무의미)가 아니라 재시도가 유의미한
+    // 사유로 옮길 수 있다.
+    val verifier =
+        AttestationVerifier({ throw IllegalStateException("네트워크 장애") }, { emptySet() }) { VALID_AT }
+
+    val result = verifier.verify(fixtureChain(), probeChallenge())
+
+    assertThat(result).isInstanceOf(AttestationResult.Rejected::class.java)
+    assertThat((result as AttestationResult.Rejected).infrastructureFailure).isTrue()
+  }
+
+  @Test
+  fun `attestationApplicationId_의_패키지가_두_개_이상이면_모호하다고_거절한다`() {
+    // 공유 UID 앱은 패키지 여러 개를 하나의 attestationApplicationId 에 묶어 넣을 수 있다.
+    // 실기기 체인으로 이 분기를 재현하려면 확장을 통째로 새로 인코딩해야 하므로,
+    // AttestationVerifier.resolvePackageIdentity 를 직접 시험한다 — 순수 함수라 체인도
+    // 인증서도 필요 없다.
+    val application =
+        AttestationApplicationId(
+            setOf(
+                AttestationPackageInfo("dev.starryeye.ondeviceagent", BigInteger.ONE),
+                AttestationPackageInfo("dev.starryeye.other", BigInteger.ONE)),
+            setOf(ByteString.EMPTY))
+
+    val identity = AttestationVerifier.resolvePackageIdentity(application)
+
+    assertThat(identity).isInstanceOf(AttestationVerifier.PackageIdentity.Rejected::class.java)
+    assertThat((identity as AttestationVerifier.PackageIdentity.Rejected).detail)
+        .isEqualTo("ambiguous attestationApplicationId")
   }
 
   @Test

@@ -12,6 +12,7 @@ import dev.starryeye.agentidentity.policy.RegistrationPolicy
 import dev.starryeye.agentidentity.policy.RejectionReason
 import dev.starryeye.agentidentity.proof.JwsProofVerifier
 import dev.starryeye.agentidentity.proof.ProofType
+import java.security.cert.CertPathValidatorException
 import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 import java.time.Clock
@@ -31,15 +32,31 @@ class RegistrationService(
     private val clock: Clock,
 ) {
 
-  /** 등록 결과. 거절이면 reason 이 채워진다. */
-  data class Outcome(val identity: AgentIdentity?, val reason: RejectionReason?) {
+  /**
+   * 등록 결과. `AuthenticationOutcome`(`CredentialController`)과 같은 모양의 봉인 인터페이스다
+   * — 두 갈래를 `identity`/`reason` 두 nullable 필드 하나에 우겨넣지 않으므로, 호출부가
+   * `when` 으로 소진 검사를 받을 수 있고 `!!` 로 서로의 존재를 가정할 필요가 없다.
+   * `identity`/`reason`/`isAccepted` 는 기존 호출부(컨트롤러·테스트)가 그대로 쓸 수 있도록
+   * 남겨 둔 호환 프로퍼티다 — 없는 쪽은 null 을 돌려준다.
+   */
+  sealed interface Outcome {
+    val identity: AgentIdentity?
+      get() = (this as? Accepted)?.identity
+
+    val reason: RejectionReason?
+      get() = (this as? Rejected)?.reason
+
     val isAccepted: Boolean
-      get() = reason == null
+      get() = this is Accepted
+
+    data class Accepted(override val identity: AgentIdentity) : Outcome
+
+    data class Rejected(override val reason: RejectionReason) : Outcome
 
     companion object {
-      fun accepted(identity: AgentIdentity): Outcome = Outcome(identity, null)
+      fun accepted(identity: AgentIdentity): Outcome = Accepted(identity)
 
-      fun rejected(reason: RejectionReason): Outcome = Outcome(null, reason)
+      fun rejected(reason: RejectionReason): Outcome = Rejected(reason)
     }
   }
 
@@ -60,10 +77,18 @@ class RegistrationService(
         when (result) {
           is AttestationResult.Verified -> result
           is AttestationResult.Rejected -> {
-            // 사유를 뭉개면 정책을 바꿔가며 관찰하는 이 연구가 성립하지 않는다.
+            // 사유를 뭉개면 정책을 바꿔가며 관찰하는 이 연구가 성립하지 않는다. 특히
+            // infrastructureFailure 는 공격도 체인 문제도 아니라 우리(또는 구글) 인프라가
+            // 죽은 것이다 — CHAIN_UNTRUSTED 로 합치면 "재시도 무의미"를 뜻하게 되는데,
+            // 실제로는 잠시 뒤 재시도하면 통과할 수 있는 일시적 장애다.
             val reason =
-                when (result.detail) {
-                  "ChallengeMismatch" -> RejectionReason.CHALLENGE_INVALID
+                when {
+                  result.infrastructureFailure -> RejectionReason.CHAIN_VERIFICATION_UNAVAILABLE
+                  result.detail == "ChallengeMismatch" -> RejectionReason.CHALLENGE_INVALID
+                  result.certPathReason == CertPathValidatorException.BasicReason.REVOKED ->
+                      RejectionReason.CHAIN_REVOKED
+                  result.certPathReason == CertPathValidatorException.BasicReason.EXPIRED ->
+                      RejectionReason.CHAIN_EXPIRED
                   else -> RejectionReason.CHAIN_UNTRUSTED
                 }
             return Outcome.rejected(reason)

@@ -10,6 +10,13 @@ enum class RejectionReason {
   CHAIN_UNTRUSTED,
   CHAIN_REVOKED,
   CHAIN_EXPIRED,
+  /**
+   * 체인 자체가 아니라 우리(또는 구글) 인프라가 문제다 — 신뢰 앵커/폐기 목록 조회가
+   * 실패했다. `CHAIN_UNTRUSTED`와 뭉뚱그리면 클라이언트가 "이 기기는 영원히 거절된다"로
+   * 읽는다 — 실제로는 잠시 뒤 다시 시도하면 통과할 수 있는 일시적 장애다. 이 사유만
+   * 재시도가 유의미하다는 점에서 다른 `CHAIN_*` 사유들과 다르다.
+   */
+  CHAIN_VERIFICATION_UNAVAILABLE,
   POLICY_SECURITY_LEVEL,
   POLICY_VERIFIED_BOOT,
   POLICY_DEVICE_LOCKED,

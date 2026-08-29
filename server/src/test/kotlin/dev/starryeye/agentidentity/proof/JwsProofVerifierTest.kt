@@ -72,6 +72,26 @@ class JwsProofVerifierTest {
   }
 
   @Test
+  fun `typ_헤더가_없으면_거절한다`() {
+    // 등록 PoP 와 런타임 DPoP 는 typ 하나로 서로의 자리에서 통과하지 못하게 나뉜다(이
+    // 프로젝트가 스스로 명시한 핵심 관심사). typ 이 아예 없는 JWS 를 만들어 이 분리가
+    // "값이 다르면 거절"이 아니라 "값이 없어도 거절"임을 확인한다.
+    val key = key()
+    val jwt =
+        SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).jwk(key.toPublicJWK()).build(),
+            JWTClaimsSet.Builder()
+                .claim("htm", "POST")
+                .claim("htu", URL)
+                .jwtID(UUID.randomUUID().toString())
+                .issueTime(Date.from(NOW))
+                .build())
+    jwt.sign(ECDSASigner(key))
+
+    assertThat(verifier().verify(jwt.serialize(), ProofType.DPOP, "POST", URL)).isNull()
+  }
+
+  @Test
   fun `등록_PoP_를_DPoP_자리에_내면_거절한다`() {
     val jws = proof(key(), "agent-reg-pop+jwt", "POST", URL, NOW)
 

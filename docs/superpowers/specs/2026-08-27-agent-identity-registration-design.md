@@ -101,7 +101,8 @@ com.samsung.android.knox.attestation
 **폐기 목록 확인은 선택이 아니다.** `https://android.googleapis.com/attestation/status`에
 공개되며, 확인 시점에 **1,742건이 등재**돼 있었다. 폐기된 attestation 키로 만든 체인은
 하드웨어 보증이 무효라는 뜻이므로, 신원을 발급하는 시스템에서 이를 건너뛰면 설계의 근거가
-사라진다. `Cache-Control`을 따르면 매 요청마다 네트워크를 타지 않아도 된다.
+사라진다. 캐시하면 매 요청마다 네트워크를 타지 않아도 된다 — 실제 구현은 응답의
+`Cache-Control` 헤더를 읽지 않고 고정 6시간 TTL로 캐시한다(§5.4의 구현 갈림 참고).
 
 **검증기는 직접 짜지 않는 쪽을 먼저 검토한다.** 구글이 공식 Kotlin 검증 라이브러리
 ([github.com/android/keyattestation](https://github.com/android/keyattestation))를 제공하며
@@ -372,7 +373,10 @@ JWS 구조, 같은 `htm`/`htu`/`iat`/`jti` 클레임에 challenge를 담는 클�
    현재 둘이며 목록은 갱신된다. 하드코딩하지 않고 캐시한다
 3. **RKP 인증서는 유효기간을 검사한다.** 레거시 공장 키(레거시 루트로 체인)는 만료돼도 통과시킨다
 4. 체인의 **모든 인증서를 CRL로 확인**한다
-   (`https://android.googleapis.com/attestation/status`, `Cache-Control` 준수)
+   (`https://android.googleapis.com/attestation/status`). 목록은 캐시한다 — 실제 구현은
+   응답의 `Cache-Control` 헤더를 읽지 않고 고정 6시간 TTL을 쓴다(§5.4). 이 목록은
+   `status` 값이 `REVOKED`인 항목만 폐기로 본다 — 구글 목록에 존재하는 `SUSPENDED` 상태는
+   무시하고 통과시킨다(`GoogleRevocationList.kt`, 서브모듈 코드)
 
 **층 2 — 확장** (OID `1.3.6.1.4.1.11129.2.1.17`)
 
@@ -572,7 +576,7 @@ agent_identity
   security_level        TRUSTED_ENVIRONMENT | STRONGBOX
   verified_boot         Verified | SelfSigned | Unverified | Failed
   device_locked         boolean
-  integrity_verdict     nullable  ← Play Integrity 결과. 보조 증거
+  integrity_verdict     nullable  ← Play Integrity 결과 자리. 보조 증거. 이번 사이클엔 항상 null(§5.3)
   device_binding        nullable  ← 7장. 이번엔 항상 null
   subject               nullable  ← ②번에서 사용자가 들어올 자리
   created_at
@@ -634,10 +638,13 @@ Key Attestation이 답하지 못하는 질문이 있다. *앱이 변조되지 �
 
 **Play Integrity를 신원으로 쓰지 않는다.** 에이전트 신원은 어디까지나 키에 묶이고, Play
 Integrity는 **정책 판단의 보조 재료**다. 등록 요청에 `playIntegrityToken` 자리를 두고,
-서버는 검증 결과를 `integrity_verdict`에 기록한다.
+`agent_identity.integrity_verdict` 컬럼도 만들어 둔다.
 
-이번 사이클에서는 **자리와 기록까지만** 한다. 판정을 거절 사유로 쓸지는 정책 손잡이로 두되
-기본값은 끈다. 구글 API 연동이 이 사이클의 무게중심을 흔들면 안 되기 때문이다.
+이번 사이클에서는 **자리만** 만든다. `RegistrationPolicy`는 `require-play-integrity`가
+켜져 있을 때 토큰이 **존재하는지**만 보고(`POLICY_INTEGRITY`), 토큰 자체를 구글 API로
+검증하지 않는다 — 그러니 검증할 "판정"이 없고, `integrity_verdict` 컬럼에는 어떤 코드
+경로도 값을 넣지 않는다. 지금은 `AgentIdentity.integrityVerdict`가 항상 `null`인 예약
+컬럼일 뿐이다. 구글 API 연동이 이 사이클의 무게중심을 흔들면 안 되기 때문이다.
 
 삼성 1st-party 환경이라면 Play Integrity 대신(또는 함께) 삼성 자체 기기·앱 신뢰 증거를 쓸 수
 있다. 7장에 함께 적는다.
@@ -676,8 +683,12 @@ agent-registration:
   `AttestationConfiguration`이 두 URL을 상수로 고정해 두었고, CRL 확인은 끌 수 있는 손잡이
   없이 항상 실행된다(§2.4의 "열어두면 우회가 된다"는 원칙을 코드가 아예 켜둔 채로 못박은
   셈이다).
+- **루트/CRL 캐시는 `Cache-Control`을 따르지 않는다.** §2.4·§4.2가 "`Cache-Control` 준수"라고
+  적은 것과 달리, `AttestationConfiguration`의 캐시는 응답 헤더를 전혀 읽지 않고 고정
+  6시간(`CACHE_TTL`) TTL로만 동작한다. 구글이 헤더로 더 짧은(또는 더 긴) 캐시 기간을
+  알려줘도 무시된다.
 
-셋 다 이번 사이클에서 실험 대상이 아니었던 값들이라 손잡이로 뺄 이유가 적었다는 점에서
+넷 다 이번 사이클에서 실험 대상이 아니었던 값들이라 손잡이로 뺄 이유가 적었다는 점에서
 의도적인 축소로 볼 수 있지만, 설계 문서만 보고 `application.yml`에 이 키들을 적어 넣으면
 아무 효과가 없다는 사실은 분명히 해 둔다.
 
@@ -807,6 +818,7 @@ agent-registration:
 | 루트가 알려진 구글 루트 집합에 없음 | 403 `CHAIN_UNTRUSTED` | 재시도 무의미 |
 | 체인 인증서가 CRL에 등재됨 | 403 `CHAIN_REVOKED` | 재시도 무의미 |
 | RKP 인증서 만료 | 403 `CHAIN_EXPIRED` | 키를 새로 만들어 재등록 |
+| 신뢰 앵커/CRL 조회 실패 (우리 또는 구글 쪽 인프라 장애 — 체인/공격 문제가 아니다) | 403 `CHAIN_VERIFICATION_UNAVAILABLE` | 잠시 뒤 재시도 |
 | PoP 검증 실패 (서명·`typ`·`htm`/`htu`·`iat` 오차·`jti` 재생 중 하나, 또는 서명자 지문이 방금 검증한 attested 키와 다름, 또는 `challenge` 클레임이 이 등록 거래의 challenge와 다름) | 403 `POP_INVALID` | proof를 다시 만들어 재시도. 원인이 challenge 재사용이면 ①부터 |
 | 보안 수준 미달 | 403 `POLICY_SECURITY_LEVEL` | 재시도 무의미 |
 | 부팅 검증 실패 | 403 `POLICY_VERIFIED_BOOT` | 재시도 무의미 |
@@ -822,20 +834,21 @@ agent-registration:
 | 신원은 있으나 `ACTIVE`가 아님 | 401 `AGENT_INACTIVE` | 재시도도 재등록도 하지 않는다. `AGENT_NOT_FOUND`와 합치면 비활성화된 신원이 새 키로 재등록해 비활성화를 그냥 우회하게 된다 |
 | 키 소실 (재설치, 공장 초기화) | — | 새로 등록 |
 
-`CHAIN_UNTRUSTED`·`CHAIN_REVOKED`·`CHAIN_EXPIRED`·`POP_INVALID`·`DPOP_INVALID`처럼 서로
-다른 사유 코드를 나눠 둔 이유는 하나다 — 이 서버는 정책을 바꿔가며 무엇이 왜 거절되는지
-관찰하는 연구용 도구이고, 사유를 뭉개면 그 관찰이 성립하지 않는다.
+`CHAIN_UNTRUSTED`·`CHAIN_REVOKED`·`CHAIN_EXPIRED`·`CHAIN_VERIFICATION_UNAVAILABLE`·
+`POP_INVALID`·`DPOP_INVALID`처럼 서로 다른 사유 코드를 나눠 둔 이유는 하나다 — 이 서버는
+정책을 바꿔가며 무엇이 왜 거절되는지 관찰하는 연구용 도구이고, 사유를 뭉개면 그 관찰이
+성립하지 않는다.
 
-**다만 지금 구현에서 이 원칙이 완전히 지켜지지는 않는다.** `RegistrationService`는 체인
-검증 실패를 `ChallengeMismatch`(→ `CHALLENGE_INVALID`) 한 갈래만 구분해 내고, 그 밖의 모든
-체인 거절 — 신뢰할 수 없는 서명, 알 수 없는 루트, **CRL 등재, RKP 만료 포함** — 은 전부
-`CHAIN_UNTRUSTED`로 뭉뚱그려 돌아간다. `CHAIN_REVOKED`·`CHAIN_EXPIRED`는 사유 코드
-열거형에는 선언돼 있지만, 이 서버의 어떤 경로도 아직 실제로 반환하지 않는다. 마찬가지로
-`CREDENTIAL_EXPIRED`도 선언만 돼 있고 반환하는 경로가 없다 — `/agent/whoami`와
-`/agent/credential`은 `Authorization` 헤더(발급된 credential JWT)를 아예 읽지 않고 DPoP
-proof의 서명자 지문만으로 신원을 찾으므로, `cnf.jkt` 대조도 credential의 `exp` 검사도
-이 두 엔드포인트에서 일어나지 않는다. 이 표는 **설계 의도**를 적은 것이며, 위 세 사유
-코드가 실제로 돌아오는지는 이번 사이클의 코드로는 확인되지 않는다.
+**`RegistrationService`는 `AttestationVerifier`(`AttestationResult.Rejected`)가 돌려주는
+`certPathReason`(`CertPathValidatorException.getReason()`)과 `infrastructureFailure`
+표시를 보고 넷을 가른다** — `ChallengeMismatch`(→ `CHALLENGE_INVALID`), `REVOKED`(→
+`CHAIN_REVOKED`), `EXPIRED`(→ `CHAIN_EXPIRED`), 인프라 조회 실패(→
+`CHAIN_VERIFICATION_UNAVAILABLE`), 그 밖의 경로 검증 실패는 여전히 `CHAIN_UNTRUSTED`로
+뭉뚱그린다(이름 불일치·알 수 없는 루트 등 — 이 사이클이 따로 구분할 이유가 있다고 보지
+않은 나머지 전부). `CREDENTIAL_EXPIRED`는 여전히 선언만 돼 있고 반환하는 경로가 없다 —
+`/agent/whoami`와 `/agent/credential`은 `Authorization` 헤더(발급된 credential JWT)를
+아예 읽지 않고 DPoP proof의 서명자 지문만으로 신원을 찾으므로, `cnf.jkt` 대조도
+credential의 `exp` 검사도 이 두 엔드포인트에서 일어나지 않는다.
 
 클라이언트(`AgentRegistrar.ensureIdentity`, §6)는 갱신이 거절됐을 때 사유에 따라 갈린다.
 `REATTESTATION_REQUIRED`나 `AGENT_NOT_FOUND`처럼 "새 키로 재등록해도 안전한" 사유만 새
@@ -845,6 +858,26 @@ proof의 서명자 지문만으로 신원을 찾으므로, `cnf.jkt` 대조도 c
 
 클라이언트는 재시도가 무의미한 사유에 대해 **반복 시도하지 않는다.** 시스템 메시지로 사유를
 보여주고 멈춘다.
+
+### 8.1 알려진 한계
+
+이번 사이클을 마무리하며 남기는, 아직 고치지 않은 한계 세 가지.
+
+- **`htu`는 Host 헤더에서 유도한 요청 URL과 비교된다.** `RegistrationController`·
+  `CredentialController` 모두 `HttpServletRequest.requestURL`(서블릿 컨테이너가 `Host`
+  헤더로 재구성한 값)을 그대로 써서 proof 의 `htu` 클레임과 비교한다. 리버스 프록시나
+  로드밸런서 뒤에 놓이면(`X-Forwarded-Host` 등) 클라이언트가 본 URL과 서버가 재구성한
+  URL이 달라져 정상 proof 가 `htu` 불일치로 거절될 수 있다.
+- **재생 방지 캐시(`jti`)는 인스턴스 로컬이다.** `JwsProofVerifier`의 `seenJti`는 프로세스
+  메모리에만 있는 `ConcurrentHashMap`이라, 서버를 재시작하면 비워진다 — 재시작 직후 창
+  안에서는 재시작 전에 쓰인 proof 의 재생을 잡아내지 못한다. 여러 인스턴스로 수평 확장하면
+  인스턴스마다 별도의 캐시를 가지므로 같은 문제가 상시로 나타난다.
+- **`POST /agent/credential`은 정책을 다시 평가하지 않는다.** attestation 을 다시 하지
+  않는다는 설계(§4.3)와 별개로, 갱신 경로는 `RegistrationPolicy.evaluate`를 아예 호출하지
+  않는다 — 등록 시점에 통과한 신원은 그 뒤 운영자가 `require-security-level`을 올리는 등
+  정책을 조여도 `max-attestation-age`가 찰 때까지 계속 갱신에 성공한다. 정책을 손잡이 삼아
+  관찰하는 이 프로젝트의 실험(§11.6, §11.7)이 "이미 등록된 에이전트"에는 소급 적용되지
+  않는다는 뜻이다.
 
 ## 9. 테스트 전략
 
@@ -936,7 +969,7 @@ proof의 서명자 지문만으로 신원을 찾으므로, `cnf.jkt` 대조도 c
 | 리스크 | 대응 |
 |---|---|
 | **attestation 체인 검증이 이 사이클의 대부분을 먹는다.** 루트 집합·RKP 유효기간·CRL·확장 파싱이 모두 놓치기 쉽다 | 공식 라이브러리 사용을 먼저 검토한다(§5). 직접 짜게 되면 §2.4 항목을 빠뜨리지 않았음을 테스트로 증명한다 |
-| 루트 목록과 CRL이 **네트워크 의존**이다. 서버가 이를 못 받으면 등록이 막힌다 | 캐시하고 `Cache-Control`을 따른다. 조회 실패 시 **등록을 거절**한다(열어두면 CRL 우회가 된다). 이 선택을 문서에 남긴다 |
+| 루트 목록과 CRL이 **네트워크 의존**이다. 서버가 이를 못 받으면 등록이 막힌다 | 캐시한다(구현은 `Cache-Control` 헤더를 읽지 않고 고정 6시간 TTL을 쓴다 — §5.4). 조회 실패 시 **등록을 거절**한다(열어두면 CRL 우회가 된다). 이 선택을 문서에 남긴다 |
 | 공식 검증 라이브러리가 Maven Central 에 없다 | 소스 빌드/벤더링 비용을 구현 첫 단계에서 재고 결정한다 |
 | 안드로이드에서 맥의 서버로 닿는 경로 | `adb reverse`. 실기기 검증에서 확인한다 |
 | A36이 TEE 전용이라 StrongBox 수용 경로를 실제로 통과시켜 볼 수 없다 | 거절 쪽만 관찰한다. 수용 경로는 픽스처로 테스트한다 |

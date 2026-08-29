@@ -12,6 +12,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.protobuf.ByteString
 import java.security.InvalidAlgorithmParameterException
+import java.security.cert.CertPathValidatorException
 import java.security.cert.TrustAnchor
 import java.security.cert.X509Certificate
 import java.util.HexFormat
@@ -35,10 +36,6 @@ class AttestationVerifier(
     private val revocation: RevocationSource,
     private val clock: InstantSource,
 ) {
-
-  companion object {
-    private val log = LoggerFactory.getLogger(AttestationVerifier::class.java)
-  }
 
   // by lazy 는 기본이 스레드 안전(SYNCHRONIZED)이라 이중 검사 잠금을 직접 짤 필요가 없다.
   // 다만 by lazy 는 예외를 캐시하지 않으므로 최초 생성이 실패하면 다음 호출에서 다시
@@ -106,7 +103,8 @@ class AttestationVerifier(
               // 반드시 시끄럽게 알려야 한다. fail-closed 는 맞는 동작이지만, 조용히 거절만
               // 하면 이게 공격 시도인지 장애인지 운영자가 구분할 수 없다.
               log.error("attestation 신뢰 앵커/폐기 목록 조회 실패 — 등록을 거절한다", e.cause)
-              return AttestationResult.Rejected("infrastructure failure: ${e.cause}")
+              return AttestationResult.Rejected(
+                  "infrastructure failure: ${e.cause}", infrastructureFailure = true)
             }
             is InvalidAlgorithmParameterException,
             is IllegalArgumentException -> {
@@ -125,7 +123,12 @@ class AttestationVerifier(
         }
 
     if (result !is VerificationResult.Success) {
-      return AttestationResult.Rejected(result.javaClass.simpleName)
+      // PathValidationFailure 는 CertPathValidatorException 을 그대로 담고 있다 — 그
+      // getReason() 이 REVOKED(CRL 등재)/EXPIRED(RKP 만료)를 나머지 경로 검증 실패와
+      // 구분할 수 있는 유일한 자리다. 여기서 옮겨두지 않으면 RegistrationService 는
+      // "PathValidationFailure" 라는 클래스 이름 하나로 셋을 뭉뚱그릴 수밖에 없다.
+      val certPathReason = (result as? VerificationResult.PathValidationFailure)?.cause?.reason
+      return AttestationResult.Rejected(result.javaClass.simpleName, certPathReason = certPathReason)
     }
 
     // 앱 신원은 Success 에 담겨 오지 않는다. leaf 를 직접 파싱해 읽는다.
@@ -137,30 +140,55 @@ class AttestationVerifier(
           return AttestationResult.Rejected("failed to parse key description: ${e.message}")
         } ?: return AttestationResult.Rejected("no key description extension")
 
-    val application: AttestationApplicationId? =
-        description.softwareEnforced.attestationApplicationId
-    if (application == null || application.packages.isEmpty()) {
-      return AttestationResult.Rejected("no attestationApplicationId")
+    return when (
+        val identity = resolvePackageIdentity(description.softwareEnforced.attestationApplicationId)) {
+      is PackageIdentity.Rejected -> AttestationResult.Rejected(identity.detail)
+      is PackageIdentity.Resolved ->
+          AttestationResult.Verified(
+              result.publicKey,
+              result.challenge.toByteArray(),
+              result.securityLevel.toString(),
+              result.verifiedBootState.toString(),
+              result.deviceLocked,
+              identity.packageName,
+              identity.signingDigests)
     }
-    if (application.packages.size > 1) {
-      // 공유 UID 앱은 패키지 여러 개를 하나의 attestationApplicationId 에 묶어 넣을 수
-      // 있다. 하나만 골라서 넘기면, 정책이 그 이름 하나로 exact-match 할 때 실제로는
-      // 같이 설치된 다른 패키지의 키로도 통과시켜 버리는 셈이 된다 — 조용히 고르지 않고
-      // 명시적으로 거절한다.
-      return AttestationResult.Rejected("ambiguous attestationApplicationId")
+  }
+
+  /** [resolvePackageIdentity] 의 결과. */
+  internal sealed interface PackageIdentity {
+    data class Resolved(val packageName: String, val signingDigests: List<String>) : PackageIdentity
+
+    data class Rejected(val detail: String) : PackageIdentity
+  }
+
+  companion object {
+    private val log = LoggerFactory.getLogger(AttestationVerifier::class.java)
+
+    /**
+     * leaf 인증서의 attestationApplicationId 하나를 패키지 신원으로 확정하거나 거절한다.
+     *
+     * 공유 UID 앱은 패키지 여러 개를 하나의 attestationApplicationId 에 묶어 넣을 수 있다.
+     * 하나만 골라서 넘기면, 정책이 그 이름 하나로 exact-match 할 때 실제로는 같이 설치된
+     * 다른 패키지의 키로도 통과시켜 버리는 셈이 된다 — 조용히 고르지 않고 명시적으로
+     * 거절한다.
+     *
+     * `verify()` 본문에서 순수 함수로 뽑아 둔 이유는 시험 때문이다. 이 분기(패키지 두 개)를
+     * 실제 attestation 체인으로 재현하려면 실기기가 만들지 않는 확장을 통째로 새로
+     * 인코딩해야 한다 — 반면 [AttestationApplicationId] 는 평범한 데이터 클래스라서, 체인도
+     * 인증서도 없이 이 함수만 직접 시험할 수 있다.
+     */
+    internal fun resolvePackageIdentity(application: AttestationApplicationId?): PackageIdentity {
+      if (application == null || application.packages.isEmpty()) {
+        return PackageIdentity.Rejected("no attestationApplicationId")
+      }
+      if (application.packages.size > 1) {
+        return PackageIdentity.Rejected("ambiguous attestationApplicationId")
+      }
+      val packageName = application.packages.iterator().next().name
+      val signingDigests: List<String> =
+          application.signatures.map { signature -> HexFormat.of().formatHex(signature.toByteArray()) }
+      return PackageIdentity.Resolved(packageName, signingDigests)
     }
-
-    val packageName = application.packages.iterator().next().name
-    val signingDigests: List<String> =
-        application.signatures.map { signature -> HexFormat.of().formatHex(signature.toByteArray()) }
-
-    return AttestationResult.Verified(
-        result.publicKey,
-        result.challenge.toByteArray(),
-        result.securityLevel.toString(),
-        result.verifiedBootState.toString(),
-        result.deviceLocked,
-        packageName,
-        signingDigests)
   }
 }

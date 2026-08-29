@@ -1,6 +1,7 @@
 package dev.starryeye.agentidentity.api
 
 import dev.starryeye.agentidentity.identity.CredentialIssuer
+import dev.starryeye.agentidentity.policy.PolicyProperties
 import dev.starryeye.agentidentity.policy.RejectionReason
 import dev.starryeye.agentidentity.registration.ChallengeStore
 import dev.starryeye.agentidentity.registration.RegistrationService
@@ -22,6 +23,7 @@ class RegistrationController(
     private val challenges: ChallengeStore,
     private val registration: RegistrationService,
     private val credentials: CredentialIssuer,
+    private val properties: PolicyProperties,
 ) {
 
   data class RegistrationRequest(
@@ -47,7 +49,7 @@ class RegistrationController(
         mapOf(
             "registrationId" to issued.registrationId,
             "challenge" to ChallengeStore.encode(issued.value),
-            "expiresIn" to 300))
+            "expiresIn" to properties.challengeTtl.toSeconds()))
   }
 
   @PostMapping
@@ -69,15 +71,16 @@ class RegistrationController(
             request.deviceBinding,
             request.playIntegrityToken)
 
-    if (!outcome.isAccepted) {
-      return ResponseEntity.status(403).body(mapOf("reason" to outcome.reason!!.name))
+    return when (outcome) {
+      is RegistrationService.Outcome.Rejected ->
+          ResponseEntity.status(403).body(mapOf("reason" to outcome.reason.name))
+      is RegistrationService.Outcome.Accepted ->
+          ResponseEntity.ok(
+              mapOf(
+                  "agentId" to outcome.identity.id,
+                  "credential" to credentials.issue(outcome.identity),
+                  "expiresIn" to properties.credentialTtl.toSeconds()))
     }
-    val identity = outcome.identity!!
-    return ResponseEntity.ok(
-        mapOf(
-            "agentId" to identity.id,
-            "credential" to credentials.issue(identity),
-            "expiresIn" to 900))
   }
 
   companion object {

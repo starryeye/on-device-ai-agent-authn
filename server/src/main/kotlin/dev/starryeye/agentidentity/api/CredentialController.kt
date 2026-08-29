@@ -55,7 +55,7 @@ class CredentialController(
         mapOf(
             "agentId" to identity.id,
             "credential" to credentials.issue(identity),
-            "expiresIn" to 900))
+            "expiresIn" to properties.credentialTtl.toSeconds()))
   }
 
   @GetMapping("/agent/whoami")

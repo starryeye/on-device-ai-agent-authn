@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 모델 파일을 최초 1회 내려받을 때만 쓴다. 이후 앱은 완전히 오프라인으로 동작한다. -->
+    <!-- 모델 파일을 최초 1회 내려받을 때 쓴다. 에이전트 신원 등록·자격증명 갱신(신원 발급
+         서버와의 HTTP 통신)에도 쓴다 — 이 사이클부터 앱이 완전히 오프라인으로 동작한다는
+         말은 더 이상 맞지 않다. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- 개발용: adb reverse로 맥 위 127.0.0.1 서버에 평문 HTTP로 신원 등록한다. -->

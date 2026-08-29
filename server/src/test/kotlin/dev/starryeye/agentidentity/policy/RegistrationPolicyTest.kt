@@ -88,6 +88,32 @@ class RegistrationPolicyTest {
   }
 
   @Test
+  fun `기기_잠금을_요구하면_잠금_해제된_기기는_거절한다`() {
+    val reason =
+        RegistrationPolicy(defaults())
+            .evaluate(
+                attestation("TRUSTED_ENVIRONMENT", "VERIFIED", false, "dev.starryeye.ondeviceagent"),
+                null,
+                null)
+
+    assertThat(reason).isEqualTo(RejectionReason.POLICY_DEVICE_LOCKED)
+  }
+
+  @Test
+  fun `무결성_판정을_요구하면_토큰이_없는_요청은_거절한다`() {
+    val strict = defaults().apply { requirePlayIntegrity = true }
+
+    val reason =
+        RegistrationPolicy(strict)
+            .evaluate(
+                attestation("TRUSTED_ENVIRONMENT", "VERIFIED", true, "dev.starryeye.ondeviceagent"),
+                null,
+                null)
+
+    assertThat(reason).isEqualTo(RejectionReason.POLICY_INTEGRITY)
+  }
+
+  @Test
   fun `기기_증명을_요구하면_소매기기는_거절한다`() {
     val strict = defaults().apply { requireDeviceBinding = true }
 

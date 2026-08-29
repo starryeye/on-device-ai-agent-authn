@@ -60,14 +60,6 @@ class AgentRegistrar(
     }
   }
 
-  /** 갱신 거절 사유 중 "새 키로 다시 등록해도 안전하다"에 해당하는 것만 [RegistrationOrigin] 으로 옮긴다. */
-  private fun reregistrationOriginFor(reason: String): RegistrationOrigin? =
-    when (reason) {
-      "REATTESTATION_REQUIRED" -> RegistrationOrigin.REATTESTATION_REQUIRED
-      "AGENT_NOT_FOUND" -> RegistrationOrigin.AGENT_NOT_FOUND
-      else -> null
-    }
-
   private suspend fun registerWithNewKey(origin: RegistrationOrigin): AgentIdentityState {
     val challengeResponse = JSONObject(send("POST", "$baseUrl/agent/registration/challenge", null))
     val registrationId = challengeResponse.getString("registrationId")
@@ -109,6 +101,26 @@ class AgentRegistrar(
   data class CredentialRefresh(val agentId: String, val credential: String)
 
   private class RegistrationRejected(val reason: String) : Exception(reason)
+
+  companion object {
+    /**
+     * 갱신 거절 사유 중 "새 키로 다시 등록해도 안전하다"에 해당하는 것만 [RegistrationOrigin]
+     * 으로 옮긴다.
+     *
+     * `internal` 로 열어 둔 이유는 시험 때문이다 — 이 매핑은 순수한 `String -> RegistrationOrigin?`
+     * 함수라 안드로이드 의존성이 전혀 없는데, 이 함수를 호출하는 [ensureIdentity] 는 실제
+     * 하드웨어 Keystore([AgentKeyStore])를 요구해 JVM 단위 테스트에서 인스턴스를 만들 수
+     * 없다. 특히 음의 절반(`DPOP_INVALID`·`AGENT_INACTIVE` 는 재등록을 트리거하면 안 된다)이
+     * 예전 라운드에서 재생 공격/폐기 우회를 막으려고 세운 불변식이다 — 여기 `else` 분기를
+     * 허용형으로 바꾸는 회귀가 조용히 그 구멍을 다시 연다.
+     */
+    internal fun reregistrationOriginFor(reason: String): RegistrationOrigin? =
+      when (reason) {
+        "REATTESTATION_REQUIRED" -> RegistrationOrigin.REATTESTATION_REQUIRED
+        "AGENT_NOT_FOUND" -> RegistrationOrigin.AGENT_NOT_FOUND
+        else -> null
+      }
+  }
 
   private fun send(method: String, url: String, body: String?, dpop: String? = null): String {
     val connection = URL(url).openConnection() as HttpURLConnection
